@@ -22,4 +22,14 @@ crash.log
 override.tf
 override.tf.json
 *_override.tf
-*_override.tf.json
+*_override.tf.json# Terraform local state & cache
+**/.terraform/
+**/.terraform.lock.hcl
+**/*.tfstate
+**/*.tfstate.*
+**/crash.log
+**/plan.out
+**/destroy.out
+
+# Do NOT commit real secrets
+**/*.tfvars
