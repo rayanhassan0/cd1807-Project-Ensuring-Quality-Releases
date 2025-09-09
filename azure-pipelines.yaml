@@ -30,16 +30,6 @@ stages:
   - job: BuildInfrastructure
     displayName: 'Terraform & Package & Tests'
     steps:
-    # (جديد) تثبيت المتطلبات على Ubuntu/Debian: unzip, curl, ca-certificates, zip (للاحتياط مع خطوات الأرشفة)
-    - task: Bash@3
-      displayName: 'Install prerequisites (Ubuntu/Debian)'
-      inputs:
-        targetType: inline
-        script: |
-          set -euxo pipefail
-          sudo apt-get update
-          sudo apt-get install -y unzip curl ca-certificates zip
-
     # ثبّت Terraform 1.2.9 على الوكيل (بديل مهمة الماركت بليس)
     - task: Bash@3
       displayName: 'Install Terraform 1.2.9'
