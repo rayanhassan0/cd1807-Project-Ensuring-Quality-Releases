@@ -30,7 +30,7 @@ stages:
   - job: BuildInfrastructure
     displayName: 'Terraform & Package & Tests'
     steps:
-    # (جديد) تثبيت المتطلبات على Ubuntu/Debian: unzip, curl, ca-certificates, zip (للاحتياط مع خطوات الأرشفة)
+    # (جديد) تثبيت المتطلبات على Ubuntu/Debian: unzip, curl, ca-certificates, zip
     - task: Bash@3
       displayName: 'Install prerequisites (Ubuntu/Debian)'
       inputs:
@@ -39,6 +39,18 @@ stages:
           set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y unzip curl ca-certificates zip
+
+    # (جديد) ثبّت Azure CLI إذا غير موجود
+    - task: Bash@3
+      displayName: 'Install Azure CLI (if missing)'
+      inputs:
+        targetType: inline
+        script: |
+          set -euxo pipefail
+          if ! command -v az >/dev/null 2>&1; then
+            curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+          fi
+          az version
 
     # ثبّت Terraform 1.2.9 على الوكيل (بديل مهمة الماركت بليس)
     - task: Bash@3
@@ -65,6 +77,7 @@ stages:
           az account show
 
     # أنشئ حساب التخزين وحاوية الـ backend لو ما وُجدت (داخل RG: Azuredevops)
+    # ✅ تم تعديلها لاستخدام env بدل $(...) داخل سكربت bash
     - task: AzureCLI@2
       displayName: 'Ensure backend storage exists'
       inputs:
@@ -73,9 +86,12 @@ stages:
         scriptLocation: inlineScript
         inlineScript: |
           set -e
-          RG="$(resourceGroup)"
-          LOC="southcentralus"   # نفس موقع الـ RG تبع اللاب
-          SA_RAW="tfstate$(Build.SourceVersionShort)"
+          RG="${RESOURCE_GROUP}"
+          LOC="${LOCATION}"
+          CONT="${STORAGE_CONTAINER}"
+
+          # اسم حساب التخزين (24 حرف كحد أقصى) — نولّده من رقم الـ Build
+          SA_RAW="tfstate${BUILD_ID}"
           SA=$(echo "$SA_RAW" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g' | cut -c1-24)
           echo "Using storage account: $SA in RG: $RG ($LOC)"
 
@@ -84,12 +100,18 @@ stages:
           fi
 
           KEY=$(az storage account keys list -g "$RG" -n "$SA" --query "[0].value" -o tsv)
-          if ! az storage container show --account-name "$SA" --name "$(storageContainer)" --auth-mode key --account-key "$KEY" >/dev/null 2>&1; then
-            az storage container create --account-name "$SA" --name "$(storageContainer)" --auth-mode key --account-key "$KEY" >/dev/null
+
+          if ! az storage container show --account-name "$SA" --name "$CONT" --auth-mode key --account-key "$KEY" >/dev/null 2>&1; then
+            az storage container create --account-name "$SA" --name "$CONT" --auth-mode key --account-key "$KEY" >/dev/null
           fi
 
           echo "##vso[task.setvariable variable=storageAccount]$SA"
           echo "##vso[task.setvariable variable=TF_STORAGE_KEY;issecret=true]$KEY"
+      env:
+        RESOURCE_GROUP: $(resourceGroup)
+        LOCATION: southcentralus
+        STORAGE_CONTAINER: $(storageContainer)
+        BUILD_ID: $(Build.BuildId)
 
     # اكتب backend.tf (نستخدم access_key لأننا على RG-scope)
     - task: Bash@3
