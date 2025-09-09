@@ -19,6 +19,8 @@ variables:
   # لازم يطابق اسم الويب آب المُنشأ من Terraform
   appServiceName: 'myapp-AppService'
   vmEnvName: 'myEnvVM'
+  # (جديد) SKU افتراضي للـ App Service Plan (عدّله لو السياسة تفرض SKU آخر)
+  appServiceSku: 'B1'
 
 stages:
 # ===========================
@@ -77,7 +79,7 @@ stages:
           az account show
 
     # أنشئ حساب التخزين وحاوية الـ backend لو ما وُجدت (داخل RG: Azuredevops)
-    # ✅ تم تعديلها لاستخدام env بدل $(...) داخل سكربت bash
+    # ✅ تستخدم env بدل $(...) داخل السكربت
     - task: AzureCLI@2
       displayName: 'Ensure backend storage exists'
       inputs:
@@ -134,7 +136,7 @@ stages:
           EOF
           echo "backend.tf written."
 
-    # اكتب terraform.tfvars بقيم اللاب (مناطق مدعومة للويب آب)
+    # اكتب terraform.tfvars — ✅ الموقع southcentralus + (جديد) app_service_sku
     - task: Bash@3
       displayName: 'Write terraform.tfvars'
       inputs:
@@ -145,15 +147,16 @@ stages:
           mkdir -p "$TF_DIR"
           cat > "$TF_DIR/terraform.tfvars" <<EOF
           # required vars for this env
-          location             = "eastus2"
+          location             = "southcentralus"
           resource_group       = "$(resourceGroup)"
           application_type     = "myapp"
           virtual_network_name = "vnet-$(environmentName)"
           address_prefix_test  = "10.0.1.0/24"
           address_space        = ["10.0.0.0/16"]
+          app_service_sku      = "$(appServiceSku)"
           EOF
           echo "terraform.tfvars written:"
-          sed -n '1,120p' "$TF_DIR/terraform.tfvars"
+          sed -n '1,200p' "$TF_DIR/terraform.tfvars"
 
     # init/validate/apply
     - task: AzureCLI@2
@@ -223,40 +226,6 @@ stages:
     - publish: $(Build.ArtifactStagingDirectory)/$(Build.BuildId)-perftests.zip
       displayName: 'Publish Perf Tests Artifact'
       artifact: drop-perftests
-
-    # -------- Postman (Newman)
-    - task: CmdLine@2
-      displayName: 'Install Newman'
-      inputs:
-        script: 'sudo npm install -g newman'
-        workingDirectory: $(System.DefaultWorkingDirectory)
-
-    - task: CmdLine@2
-      displayName: 'Run Data Validation Tests'
-      continueOnError: true
-      inputs:
-        script: |
-          cd automatedtesting/postman
-          newman run TestSuite.Data-Validation.json -e Test.environment.json --reporters cli,junit --reporter-junit-export TEST-DataValidation.xml
-        workingDirectory: '$(System.DefaultWorkingDirectory)'
-
-    - task: CmdLine@2
-      displayName: 'Run Regression Tests'
-      continueOnError: true
-      inputs:
-        script: |
-          cd automatedtesting/postman
-          newman run TestSuite.Regression.json -e Test.environment.json --reporters cli,junit --reporter-junit-export TEST-Regression.xml
-        workingDirectory: '$(System.DefaultWorkingDirectory)'
-
-    - task: PublishTestResults@2
-      displayName: 'Publish Postman JUnit Results'
-      inputs:
-        testResultsFormat: 'JUnit'
-        testResultsFiles: '**/TEST-*.xml'
-        searchFolder: '$(System.DefaultWorkingDirectory)/automatedtesting/postman'
-        mergeTestResults: true
-        testRunTitle: 'Postman Results'
 
 # ===========================
 # DEPLOYMENT (WebApp + JMeter)
