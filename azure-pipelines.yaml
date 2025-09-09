@@ -1,8 +1,4 @@
-# ===========================
-# Azure Pipelines
-# ===========================
 name: Azure Pipelines
-
 trigger:
 - main
 
@@ -19,12 +15,10 @@ variables:
   storageAccount: 'stb0f0bb7d'
   storageContainer: 'tfstate'
   tfstateKey: 'test.terraform.tfstate'
-  # اسم الويب آب ديناميكي مبني على BuildId
-  appServiceName: 'fakerest-$(Build.BuildId)'
+  appServiceName: 'fakerest-$(Build.BuildId)'   # ← ديناميكي
   vmEnvName: 'myEnvVM'
 
 stages:
-
 # ===========================
 # BUILD (Terraform + Tests)
 # ===========================
@@ -34,14 +28,13 @@ stages:
   - job: BuildInfrastructure
     displayName: 'Terraform & Package & Tests'
     steps:
-
-    # Terraform install (نثبت نفس النسخة المستخدمة سابقاً)
+    # Terraform install
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
       displayName: 'Install Terraform 1.2.9'
       inputs:
         terraformVersion: '1.2.9'
 
-    # Az Login عبر Service Connection
+    # Azure login (يضمن صلاحيات RBAC)
     - task: AzureCLI@2
       displayName: 'Az Login (Service Connection)'
       inputs:
@@ -51,7 +44,7 @@ stages:
         inlineScript: |
           az account show
 
-    # احصل على مفتاح حساب التخزين لوضعه في backend.tf
+    # احصل على مفتاح التخزين لتوليد backend.tf
     - task: AzureCLI@2
       displayName: 'Get Storage Account Key'
       inputs:
@@ -63,16 +56,16 @@ stages:
           KEY=$(az storage account keys list -g "$(resourceGroup)" -n "$(storageAccount)" --query "[0].value" -o tsv)
           echo "##vso[task.setvariable variable=TF_STORAGE_KEY;issecret=true]$KEY"
 
-    # اكتب backend.tf بالـ access_key
+    # اكتب backend.tf (نستخدم access_key بدل MSI)
     - task: Bash@3
       displayName: 'Write backend.tf'
       inputs:
         targetType: inline
         script: |
           set -e
-          TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/$(environmentName)"
+          TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/test"
           mkdir -p "$TF_DIR"
-          cat > "$TF_DIR/backend.tf" <<EOF
+          cat > "$TF_DIR/backend.tf" << 'EOF'
           terraform {
             backend "azurerm" {
               storage_account_name = "$(storageAccount)"
@@ -82,16 +75,16 @@ stages:
             }
           }
           EOF
-          echo "backend.tf written at $TF_DIR/backend.tf"
+          echo "backend.tf written."
 
-    # ==== اكتب terraform.tfvars من متغيرات البايبلان ====
+    # اكتب terraform.tfvars (خيار b)
     - task: Bash@3
       displayName: 'Write terraform.tfvars'
       inputs:
         targetType: 'inline'
         script: |
           set -e
-          TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/$(environmentName)"
+          TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/test"
           mkdir -p "$TF_DIR"
           cat > "$TF_DIR/terraform.tfvars" <<EOF
           # required vars for this env
@@ -105,7 +98,7 @@ stages:
           echo "terraform.tfvars written:"
           sed -n '1,120p' "$TF_DIR/terraform.tfvars"
 
-    # ==== Terraform init/validate/apply باستخدام var-file ====
+    # شيل أي BOM من main.tf (علاج ﻿provider) ثم init/validate/apply باستخدام Azure CLI
     - task: AzureCLI@2
       displayName: 'Terraform init/validate/apply'
       inputs:
@@ -114,8 +107,17 @@ stages:
         scriptLocation: inlineScript
         inlineScript: |
           set -e
-          TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/$(environmentName)"
+          TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/test"
           cd "$TF_DIR"
+
+          # إزالة BOM إن وجد (U+FEFF) من بداية الملف
+          sed -i '1s/^\xEF\xBB\xBF//' main.tf || true
+
+          # ثبّت الاشتراك لمزوّد azurerm بشكل صريح
+          SUB_ID=$(az account show --query id -o tsv)
+          TENANT_ID=$(az account show --query tenantId -o tsv)
+          export ARM_SUBSCRIPTION_ID="$SUB_ID"
+          export ARM_TENANT_ID="$TENANT_ID"
 
           echo "== terraform init =="
           terraform init -input=false
@@ -321,17 +323,21 @@ stages:
         scriptLocation: inlineScript
         inlineScript: |
           az account show
+
     - task: AzureCLI@2
-      displayName: 'Terraform destroy (-var-file, -input=false)'
+      displayName: 'Terraform destroy'
       inputs:
         azureSubscription: '$(azureServiceConnectionId)'
         scriptType: bash
         scriptLocation: inlineScript
         inlineScript: |
           set -e
-          TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/$(environmentName)"
+          TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/test"
           cd "$TF_DIR"
-          terraform destroy -auto-approve -input=false -lock-timeout=5m -var-file="terraform.tfvars" || {
-            echo "If state is locked, unlock with: terraform force-unlock -force <LOCK_ID>"
-            exit 1
-          }
+          sed -i '1s/^\xEF\xBB\xBF//' main.tf || true
+          SUB_ID=$(az account show --query id -o tsv)
+          TENANT_ID=$(az account show --query tenantId -o tsv)
+          export ARM_SUBSCRIPTION_ID="$SUB_ID"
+          export ARM_TENANT_ID="$TENANT_ID"
+          terraform init -input=false
+          terraform destroy -auto-approve -input=false -lock-timeout=5m -var-file="terraform.tfvars"
