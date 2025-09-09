@@ -15,7 +15,7 @@ variables:
   storageAccount: 'stb0f0bb7d'
   storageContainer: 'tfstate'
   tfstateKey: 'test.terraform.tfstate'
-  appServiceName: 'fakerest-myApplication'
+  appServiceName: 'fakerest-$(Build.BuildId)'   # <-- تم التعديل هنا ليكون فريد لكل Run
   vmEnvName: 'myEnvVM'
 
 stages:
