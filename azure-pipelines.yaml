@@ -2,9 +2,9 @@ name: Azure Pipelines
 trigger:
 - main
 
-# نستخدم الـ self-hosted agent
+# استخدم Microsoft-hosted agent
 pool:
-  name: myAgentPool
+  vmImage: 'ubuntu-latest'
 
 variables:
   python.version: '3.7.6'
@@ -12,10 +12,12 @@ variables:
   projectRoot: $(System.DefaultWorkingDirectory)
   environmentName: 'test'
   resourceGroup: 'Azuredevops'
-  storageAccount: 'stb0f0bb7d'
+  # سيتم توليد اسم حساب التخزين وتحديثه أثناء الخطوات
+  storageAccount: 'tfstatebootstrap'
   storageContainer: 'tfstate'
   tfstateKey: 'test.terraform.tfstate'
-  appServiceName: 'fakerest-$(Build.BuildId)'   # ← ديناميكي
+  # يجب أن يطابق اسم الويب آب الذي يصنعه Terraform
+  appServiceName: 'myapp-AppService'
   vmEnvName: 'myEnvVM'
 
 stages:
@@ -27,6 +29,8 @@ stages:
   jobs:
   - job: BuildInfrastructure
     displayName: 'Terraform & Package & Tests'
+    pool:
+      vmImage: 'ubuntu-latest'
     steps:
     # Terraform install
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
@@ -34,7 +38,7 @@ stages:
       inputs:
         terraformVersion: '1.2.9'
 
-    # Azure login (يضمن صلاحيات RBAC)
+    # تأكد من تسجيل الدخول
     - task: AzureCLI@2
       displayName: 'Az Login (Service Connection)'
       inputs:
@@ -44,19 +48,34 @@ stages:
         inlineScript: |
           az account show
 
-    # احصل على مفتاح التخزين لتوليد backend.tf
+    # أنشئ حساب التخزين وحاوية الـ backend إن لم تكن موجودة (على RG فقط)
     - task: AzureCLI@2
-      displayName: 'Get Storage Account Key'
+      displayName: 'Ensure backend storage exists'
       inputs:
         azureSubscription: '$(azureServiceConnectionId)'
         scriptType: bash
         scriptLocation: inlineScript
         inlineScript: |
           set -e
-          KEY=$(az storage account keys list -g "$(resourceGroup)" -n "$(storageAccount)" --query "[0].value" -o tsv)
+          RG="$(resourceGroup)"
+          LOC="eastus2"
+          # اسم حساب التخزين يجب أن يكون lower و <= 24 حرف
+          SA_RAW="tfstate$(Build.SourceVersionShort)"
+          SA=$(echo "$SA_RAW" | tr '[:upper:]' '[:lower:]' | cut -c1-24)
+          echo "Using storage account: $SA in $RG"
+
+          if ! az storage account show -g "$RG" -n "$SA" >/dev/null 2>&1; then
+            az storage account create -g "$RG" -n "$SA" -l "$LOC" --sku Standard_LRS
+          fi
+
+          KEY=$(az storage account keys list -g "$RG" -n "$SA" --query "[0].value" -o tsv)
+          if ! az storage container show --account-name "$SA" --name "$(storageContainer)" --auth-mode key --account-key "$KEY" >/dev/null 2>&1; then
+            az storage container create --account-name "$SA" --name "$(storageContainer)" --auth-mode key --account-key "$KEY" >/dev/null
+          fi
+          echo "##vso[task.setvariable variable=storageAccount]$SA"
           echo "##vso[task.setvariable variable=TF_STORAGE_KEY;issecret=true]$KEY"
 
-    # اكتب backend.tf (نستخدم access_key بدل MSI)
+    # اكتب backend.tf (نستخدم access_key لأننا على RG-scope)
     - task: Bash@3
       displayName: 'Write backend.tf'
       inputs:
@@ -65,7 +84,7 @@ stages:
           set -e
           TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/test"
           mkdir -p "$TF_DIR"
-          cat > "$TF_DIR/backend.tf" << 'EOF'
+          cat > "$TF_DIR/backend.tf" << EOF
           terraform {
             backend "azurerm" {
               storage_account_name = "$(storageAccount)"
@@ -77,7 +96,7 @@ stages:
           EOF
           echo "backend.tf written."
 
-    # اكتب terraform.tfvars (خيار b)
+    # اكتب terraform.tfvars بقيم اللاب المدعومة
     - task: Bash@3
       displayName: 'Write terraform.tfvars'
       inputs:
@@ -88,7 +107,7 @@ stages:
           mkdir -p "$TF_DIR"
           cat > "$TF_DIR/terraform.tfvars" <<EOF
           # required vars for this env
-          location             = "eastus"
+          location             = "eastus2"
           resource_group       = "$(resourceGroup)"
           application_type     = "myapp"
           virtual_network_name = "vnet-$(environmentName)"
@@ -98,7 +117,7 @@ stages:
           echo "terraform.tfvars written:"
           sed -n '1,120p' "$TF_DIR/terraform.tfvars"
 
-    # شيل أي BOM من main.tf (علاج ﻿provider) ثم init/validate/apply باستخدام Azure CLI
+    # init/validate/apply باستخدام خدمة الاتصال
     - task: AzureCLI@2
       displayName: 'Terraform init/validate/apply'
       inputs:
@@ -110,10 +129,10 @@ stages:
           TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/test"
           cd "$TF_DIR"
 
-          # إزالة BOM إن وجد (U+FEFF) من بداية الملف
+          # إزالة BOM إن وجد من main.tf
           sed -i '1s/^\xEF\xBB\xBF//' main.tf || true
 
-          # ثبّت الاشتراك لمزوّد azurerm بشكل صريح
+          # صراحةً ثبّت اشتراك/مستأجر لمزوّد azurerm
           SUB_ID=$(az account show --query id -o tsv)
           TENANT_ID=$(az account show --query tenantId -o tsv)
           export ARM_SUBSCRIPTION_ID="$SUB_ID"
@@ -211,7 +230,7 @@ stages:
   - deployment: FakeRestAPI
     displayName: 'Deploy App & Run Load Tests'
     pool:
-      name: myAgentPool
+      vmImage: 'ubuntu-latest'
     environment: $(vmEnvName)
     strategy:
       runOnce:
@@ -313,7 +332,7 @@ stages:
   jobs:
   - job: Destroy
     pool:
-      name: myAgentPool
+      vmImage: 'ubuntu-latest'
     steps:
     - task: AzureCLI@2
       displayName: 'Az Login'
