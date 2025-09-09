@@ -369,3 +369,4 @@ stages:
           export ARM_TENANT_ID="$TENANT_ID"
           terraform init -input=false
           terraform destroy -auto-approve -input=false -lock-timeout=5m -var-file="terraform.tfvars"
+#fffffff3f
