@@ -3,9 +3,8 @@ resource "azurerm_service_plan" "test" {
   location            = "${var.location}"
   resource_group_name = "${var.resource_group}"
 
-  # بدّل من F1 (Free) إلى B1 (Basic) لتفادي مشكلة الكوتا
   os_type  = "Linux"
-  sku_name = "B1"
+  sku_name = "S1"   # كان F1/B1 -> رفعناه إلى S1 لتفادي الكوتا
 }
 
 resource "azurerm_linux_web_app" "test" {
@@ -19,6 +18,6 @@ resource "azurerm_linux_web_app" "test" {
   }
 
   site_config {
-    always_on = false   # B1 يسمح بتعطيل AlwaysOn
+    always_on = false
   }
 }
