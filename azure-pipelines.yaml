@@ -7,20 +7,17 @@ pool:
   name: myAgentPool
 
 variables:
-  python.version: '3.7.6'
   azureServiceConnectionId: 'udacity-az-sp'
-  projectRoot: $(System.DefaultWorkingDirectory)
-  environmentName: 'test'
   resourceGroup: 'Azuredevops'
   storageAccount: 'stb0f0bb7d'
   storageContainer: 'tfstate'
   tfstateKey: 'test.terraform.tfstate'
-  appServiceName: 'fakerest-$(Build.BuildId)'   # فريد لكل Run
+  appServiceName: 'fakerest-$(Build.BuildId)'   # اسم فريد لكل Run
   vmEnvName: 'myEnvVM'
 
 stages:
 # ===========================
-# BUILD (Terraform + Tests)
+# BUILD (Terraform + Postman + JMeter artifacts)
 # ===========================
 - stage: Build
   displayName: 'Build: Terraform + Package + API/Load'
@@ -28,13 +25,15 @@ stages:
   - job: BuildInfrastructure
     displayName: 'Terraform & Package & Tests'
     steps:
-    # Terraform install (باستخدام الإضافة)
-    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
-      displayName: 'Install Terraform 1.2.9'
-      inputs:
-        terraformVersion: '1.2.9'
+    - checkout: self
 
-    # --- تسجيل الدخول (باستخدام Service Connection) للحصول على صلاحيات RBAC
+    # --- Install Terraform 1.6.6
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
+      displayName: 'Install Terraform 1.6.6'
+      inputs:
+        terraformVersion: '1.6.6'
+
+    # --- Login to Azure (via service connection)
     - task: AzureCLI@2
       displayName: 'Az Login (Service Connection)'
       inputs:
@@ -44,7 +43,7 @@ stages:
         inlineScript: |
           az account show
 
-    # === احصل على مفتاح حساب التخزين كمتغير بايبلان ===
+    # --- Get storage account key into pipeline secret var
     - task: AzureCLI@2
       displayName: 'Get Storage Account Key'
       inputs:
@@ -55,7 +54,7 @@ stages:
           KEY=$(az storage account keys list -g "$(resourceGroup)" -n "$(storageAccount)" --query "[0].value" -o tsv)
           echo "##vso[task.setvariable variable=TF_STORAGE_KEY;issecret=true]$KEY"
 
-    # === اكتب backend.tf باستخدام access_key ===
+    # --- Write backend.tf using access_key (so TF won't try MSI)
     - task: Bash@3
       displayName: 'Write backend.tf'
       inputs:
@@ -74,18 +73,18 @@ stages:
           EOF
           echo "backend.tf written."
 
-    # === Terraform init (باستخدام Bash بدلاً من TerraformTaskV3@3 لتفادي إلزام حقول backend) ===
+    # --- Terraform init via bash (no interactive input)
     - task: Bash@3
       displayName: 'Terraform init'
       inputs:
         targetType: inline
         script: |
+          set -e
           cd $(System.DefaultWorkingDirectory)/terraform/environments/test
           terraform init -input=false
           terraform version
-          ls -la
 
-    # Terraform validate (تبقى باستخدام الإضافة)
+    # --- Terraform validate (still fine with the task)
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
       displayName: 'Terraform validate'
       inputs:
@@ -93,16 +92,20 @@ stages:
         command: 'validate'
         workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
 
-    # Terraform apply
-    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
-      displayName: 'Terraform apply'
+    # --- Terraform apply (pass tfvars + disable input)
+    - task: Bash@3
+      displayName: 'Terraform apply (-var-file, -input=false)'
       inputs:
-        provider: 'azurerm'
-        command: 'apply'
-        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
-        environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
+        targetType: inline
+        script: |
+          set -euo pipefail
+          cd $(System.DefaultWorkingDirectory)/terraform/environments/test
+          export TF_LOG_PATH=$(System.DefaultWorkingDirectory)/tf-apply.log
+          terraform apply -auto-approve -input=false -no-color -var-file="terraform.tfvars" -lock-timeout=5m -parallelism=2
+          echo "----- tail tf-apply.log (if exists) -----"
+          tail -n 200 $(System.DefaultWorkingDirectory)/tf-apply.log || true
 
-    # -------- Archive Selenium tests
+    # -------- Archive UI tests (Selenium)
     - task: ArchiveFiles@2
       displayName: 'Archive UI Tests (Selenium)'
       inputs:
@@ -110,12 +113,11 @@ stages:
         includeRootFolder: false
         archiveType: 'zip'
         archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-uitests.zip'
-
     - publish: $(Build.ArtifactStagingDirectory)/$(Build.BuildId)-uitests.zip
       displayName: 'Publish UI Tests Artifact'
       artifact: drop-uitests
 
-    # -------- Archive FakeRestAPI (مجلد التطبيق)
+    # -------- Archive FakeRestAPI (App)
     - task: ArchiveFiles@2
       displayName: 'Archive FakeRestAPI'
       inputs:
@@ -123,12 +125,11 @@ stages:
         includeRootFolder: false
         archiveType: 'zip'
         archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-fakerestapi.zip'
-
     - publish: $(Build.ArtifactStagingDirectory)/$(Build.BuildId)-fakerestapi.zip
       displayName: 'Publish FakeRestAPI Artifact'
       artifact: drop-fakerestapi
 
-    # -------- JMeter (Performance) – نحفظ اختبار Starter
+    # -------- Archive JMeter test plan
     - task: ArchiveFiles@2
       displayName: 'Archive PerformanceTestSuite (JMeter)'
       inputs:
@@ -136,12 +137,11 @@ stages:
         includeRootFolder: false
         archiveType: 'zip'
         archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-perftests.zip'
-
     - publish: $(Build.ArtifactStagingDirectory)/$(Build.BuildId)-perftests.zip
       displayName: 'Publish Perf Tests Artifact'
       artifact: drop-perftests
 
-    # -------- Postman (Newman)
+    # -------- Newman (Postman)
     - task: CmdLine@2
       displayName: 'Install Newman'
       inputs:
@@ -176,7 +176,7 @@ stages:
         testRunTitle: 'Postman Results'
 
 # ===========================
-# DEPLOYMENT (WebApp + JMeter)
+# DEPLOY (WebApp + JMeter)
 # ===========================
 - stage: Deploy
   displayName: 'Deploy WebApp & Run JMeter'
@@ -202,7 +202,6 @@ stages:
               appType: 'webApp'
               package: '$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip'
 
-          # احصل على رابط التطبيق لتشغيل JMeter عليه
           - task: AzureCLI@2
             displayName: 'Get App URL'
             inputs:
@@ -215,7 +214,6 @@ stages:
                 echo "App URL: https://$HN"
             name: appurl
 
-          # شغّل JMeter (من /opt/jmeter على الـ VM)
           - task: CmdLine@2
             displayName: 'Run JMeter (Performance)'
             inputs:
@@ -253,7 +251,6 @@ stages:
           steps:
           - download: current
             artifact: drop-uitests
-
           - task: Bash@3
             displayName: 'Execute Selenium'
             inputs:
@@ -270,7 +267,7 @@ stages:
                 tail -n 120 /var/log/selenium/selenium.log || true
 
 # ===========================
-# CLEANUP (Destroy)
+# CLEANUP
 # ===========================
 - stage: Cleanup
   displayName: 'Terraform Destroy'
@@ -288,10 +285,13 @@ stages:
         scriptLocation: inlineScript
         inlineScript: |
           az account show
-    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
-      displayName: 'Terraform destroy'
+
+    # destroy مع -var-file و -input=false
+    - task: Bash@3
+      displayName: 'Terraform destroy (-var-file, -input=false)'
       inputs:
-        provider: 'azurerm'
-        command: 'destroy'
-        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
-        environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
+        targetType: inline
+        script: |
+          set -e
+          cd $(System.DefaultWorkingDirectory)/terraform/environments/test
+          terraform destroy -auto-approve -input=false -no-color -var-file="terraform.tfvars"
