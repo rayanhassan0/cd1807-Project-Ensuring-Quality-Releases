@@ -2,7 +2,7 @@ name: Azure Pipelines
 trigger:
 - main
 
-# استخدم Microsoft-hosted agent
+# Microsoft-hosted agent
 pool:
   vmImage: 'ubuntu-latest'
 
@@ -12,7 +12,7 @@ variables:
   projectRoot: $(System.DefaultWorkingDirectory)
   environmentName: 'test'
   resourceGroup: 'Azuredevops'
-  # سيتم توليد اسم حساب التخزين وتحديثه أثناء الخطوات
+  # سيتم توليد اسم حساب التخزين أثناء الخطوات
   storageAccount: 'tfstatebootstrap'
   storageContainer: 'tfstate'
   tfstateKey: 'test.terraform.tfstate'
@@ -32,13 +32,30 @@ stages:
     pool:
       vmImage: 'ubuntu-latest'
     steps:
-    # Terraform install
-    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
+    # تثبيت الأدوات الأساسية
+    - task: Bash@3
+      displayName: 'Install prerequisites'
+      inputs:
+        targetType: inline
+        script: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y unzip curl jq
+
+    # تثبيت Terraform 1.2.9 (بديل للمهمة المفقودة)
+    - task: Bash@3
       displayName: 'Install Terraform 1.2.9'
       inputs:
-        terraformVersion: '1.2.9'
+        targetType: inline
+        script: |
+          set -euo pipefail
+          TF_VERSION=1.2.9
+          curl -fsSL -o terraform.zip "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+          unzip -o terraform.zip
+          sudo mv -f terraform /usr/local/bin/terraform
+          terraform -version
 
-    # تأكد من تسجيل الدخول
+    # تأكد من تسجيل الدخول عبر Service Connection
     - task: AzureCLI@2
       displayName: 'Az Login (Service Connection)'
       inputs:
@@ -46,9 +63,10 @@ stages:
         scriptType: bash
         scriptLocation: inlineScript
         inlineScript: |
+          set -euo pipefail
           az account show
 
-    # أنشئ حساب التخزين وحاوية الـ backend إن لم تكن موجودة (على RG فقط)
+    # إنشاء/ضمان وجود الـ backend storage + الحاوية
     - task: AzureCLI@2
       displayName: 'Ensure backend storage exists'
       inputs:
@@ -56,10 +74,10 @@ stages:
         scriptType: bash
         scriptLocation: inlineScript
         inlineScript: |
-          set -e
+          set -euo pipefail
           RG="$(resourceGroup)"
           LOC="eastus2"
-          # اسم حساب التخزين يجب أن يكون lower و <= 24 حرف
+          # اسم حساب التخزين lower وبحد أقصى 24 حرف
           SA_RAW="tfstate$(Build.SourceVersionShort)"
           SA=$(echo "$SA_RAW" | tr '[:upper:]' '[:lower:]' | cut -c1-24)
           echo "Using storage account: $SA in $RG"
@@ -75,13 +93,13 @@ stages:
           echo "##vso[task.setvariable variable=storageAccount]$SA"
           echo "##vso[task.setvariable variable=TF_STORAGE_KEY;issecret=true]$KEY"
 
-    # اكتب backend.tf (نستخدم access_key لأننا على RG-scope)
+    # كتابة backend.tf (نستخدم access_key لأن الـ scope على RG)
     - task: Bash@3
       displayName: 'Write backend.tf'
       inputs:
         targetType: inline
         script: |
-          set -e
+          set -euo pipefail
           TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/test"
           mkdir -p "$TF_DIR"
           cat > "$TF_DIR/backend.tf" << EOF
@@ -96,13 +114,13 @@ stages:
           EOF
           echo "backend.tf written."
 
-    # اكتب terraform.tfvars بقيم اللاب المدعومة
+    # كتابة terraform.tfvars بقيم اللاب المدعومة
     - task: Bash@3
       displayName: 'Write terraform.tfvars'
       inputs:
         targetType: 'inline'
         script: |
-          set -e
+          set -euo pipefail
           TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/test"
           mkdir -p "$TF_DIR"
           cat > "$TF_DIR/terraform.tfvars" <<EOF
@@ -117,7 +135,7 @@ stages:
           echo "terraform.tfvars written:"
           sed -n '1,120p' "$TF_DIR/terraform.tfvars"
 
-    # init/validate/apply باستخدام خدمة الاتصال
+    # Terraform init/validate/apply باستخدام Service Connection
     - task: AzureCLI@2
       displayName: 'Terraform init/validate/apply'
       inputs:
@@ -125,14 +143,14 @@ stages:
         scriptType: bash
         scriptLocation: inlineScript
         inlineScript: |
-          set -e
+          set -euo pipefail
           TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/test"
           cd "$TF_DIR"
 
-          # إزالة BOM إن وجد من main.tf
+          # إزالة BOM من main.tf إن وجد
           sed -i '1s/^\xEF\xBB\xBF//' main.tf || true
 
-          # صراحةً ثبّت اشتراك/مستأجر لمزوّد azurerm
+          # تثبيت متغيرات مزوّد azurerm من سياق خدمة AzureCLI
           SUB_ID=$(az account show --query id -o tsv)
           TENANT_ID=$(az account show --query tenantId -o tsv)
           export ARM_SUBSCRIPTION_ID="$SUB_ID"
@@ -147,7 +165,7 @@ stages:
           echo "== terraform apply =="
           terraform apply -auto-approve -input=false -lock-timeout=5m -var-file="terraform.tfvars"
 
-    # -------- Archive Selenium tests
+    # -------- أرشفة اختبارات Selenium
     - task: ArchiveFiles@2
       displayName: 'Archive UI Tests (Selenium)'
       inputs:
@@ -160,7 +178,7 @@ stages:
       displayName: 'Publish UI Tests Artifact'
       artifact: drop-uitests
 
-    # -------- Archive FakeRestAPI (مجلد التطبيق)
+    # -------- أرشفة تطبيق FakeRestAPI
     - task: ArchiveFiles@2
       displayName: 'Archive FakeRestAPI'
       inputs:
@@ -173,7 +191,7 @@ stages:
       displayName: 'Publish FakeRestAPI Artifact'
       artifact: drop-fakerestapi
 
-    # -------- JMeter (Performance)
+    # -------- أرشفة ملفات JMeter (Performance)
     - task: ArchiveFiles@2
       displayName: 'Archive PerformanceTestSuite (JMeter)'
       inputs:
@@ -254,6 +272,7 @@ stages:
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
+                set -euo pipefail
                 HN=$(az webapp show -g "$(resourceGroup)" -n "$(appServiceName)" --query defaultHostName -o tsv)
                 echo "##vso[task.setvariable variable=APPSERVICEURL;isOutput=true]https://$HN"
                 echo "App URL: https://$HN"
@@ -266,7 +285,7 @@ stages:
             displayName: 'Run JMeter (Performance)'
             inputs:
               script: |
-                set -e
+                set -euo pipefail
                 if [ -x /opt/jmeter/bin/jmeter ]; then
                   export JM=/opt/jmeter
                 else
@@ -313,7 +332,7 @@ stages:
             inputs:
               targetType: 'inline'
               script: |
-                set -e
+                set -euo pipefail
                 python3 -m pip install --user -r $(Pipeline.Workspace)/drop-uitests/requirements.txt || true
                 export DEMO_URL="https://www.saucedemo.com/"
                 export DEMO_USER="standard_user"
@@ -341,6 +360,7 @@ stages:
         scriptType: bash
         scriptLocation: inlineScript
         inlineScript: |
+          set -euo pipefail
           az account show
 
     - task: AzureCLI@2
@@ -350,7 +370,7 @@ stages:
         scriptType: bash
         scriptLocation: inlineScript
         inlineScript: |
-          set -e
+          set -euo pipefail
           TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/test"
           cd "$TF_DIR"
           sed -i '1s/^\xEF\xBB\xBF//' main.tf || true
