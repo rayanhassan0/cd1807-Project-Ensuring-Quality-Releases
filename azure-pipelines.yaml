@@ -311,34 +311,28 @@ stages:
               ArtifactName: 'jmeter-report'
               publishLocation: 'Container'
 
-  - deployment: VMDeploy
+  # 🚀 تشغيل سيلينيوم على نفس الـ self-hosted agent بدون Environment
+  - job: SeleniumUITests
     displayName: 'Selenium UI Tests'
     pool:
       name: myAgentPool
-    environment:
-      name: $(environmentName)
-      resourceType: VirtualMachine
-      tags: selenium
-    strategy:
-      runOnce:
-        deploy:
-          steps:
-          - download: current
-            artifact: drop-uitests
-          - task: Bash@3
-            displayName: 'Run Selenium'
-            inputs:
-              targetType: 'inline'
-              script: |
-                set -e
-                mkdir -p "$HOME/selenium"
-                unzip -o "$(Pipeline.Workspace)/drop-uitests/$(Build.BuildId)-uitests.zip" -d "$HOME/selenium"
-                python3 -m pip install --user -r "$HOME/selenium/requirements.txt" || true
-                export DEMO_URL="https://www.saucedemo.com/"
-                export DEMO_USER="standard_user"
-                export DEMO_PASS="secret_sauce"
-                python3 "$HOME/selenium/login.py" || true
-                echo "Selenium finished."
+    steps:
+    - download: current
+      artifact: drop-uitests
+    - task: Bash@3
+      displayName: 'Run Selenium'
+      inputs:
+        targetType: 'inline'
+        script: |
+          set -e
+          mkdir -p "$HOME/selenium"
+          unzip -o "$(Pipeline.Workspace)/drop-uitests/$(Build.BuildId)-uitests.zip" -d "$HOME/selenium"
+          python3 -m pip install --user -r "$HOME/selenium/requirements.txt" || true
+          export DEMO_URL="https://www.saucedemo.com/"
+          export DEMO_USER="standard_user"
+          export DEMO_PASS="secret_sauce"
+          python3 "$HOME/selenium/login.py" || true
+          echo "Selenium finished."
 
 # =============== CLEANUP ===============
 - stage: Cleanup
