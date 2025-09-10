@@ -34,6 +34,42 @@ stages:
       inputs:
         terraformVersion: '1.13.1'
 
+    # تأكيد أن ملفات التيرافورم موجودة (مطابقة لهيكل صاحبتك)
+    - task: Bash@3
+      displayName: 'Debug: list terraform folder'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+          ls -la $(System.DefaultWorkingDirectory)/terraform/environments/test
+          echo "---- modules/appservice ----"
+          ls -la $(System.DefaultWorkingDirectory)/terraform/environments/test/modules/appservice || true
+          echo "---- modules/network ----"
+          ls -la $(System.DefaultWorkingDirectory)/terraform/environments/test/modules/network || true
+          echo "---- terraform.tfvars ----"
+          sed -n '1,200p' $(System.DefaultWorkingDirectory)/terraform/environments/test/terraform.tfvars
+
+    # نضمن وجود تخزين backend (SA + container)
+    - task: AzureCLI@2
+      displayName: 'Ensure backend storage exists'
+      inputs:
+        azureSubscription: '$(azureServiceConnectionId)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -e
+          RG="$(resourceGroup)"
+          LOC="westus3"
+          SA="tfstatebootstrap01"
+          echo "Ensure SA=$SA RG=$RG LOC=$LOC"
+          if ! az storage account show -g "$RG" -n "$SA" >/dev/null 2>&1; then
+            az storage account create -g "$RG" -n "$SA" -l "$LOC" --sku Standard_LRS
+          fi
+          KEY=$(az storage account keys list -g "$RG" -n "$SA" --query "[0].value" -o tsv)
+          az storage container create --name tfstate --account-name "$SA" --auth-mode key --account-key "$KEY" >/dev/null
+          echo "Backend ready."
+
+    # init على نفس مسار الموديولات
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
       displayName: 'Terraform init'
       inputs:
@@ -232,15 +268,15 @@ stages:
     pool:
       name: myAgentPool
     steps:
-    - task: AzureCLI@2
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
+      displayName: 'Terraform installation (Cleanup)'
+      inputs:
+        terraformVersion: '1.13.1'
+
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
       displayName: 'Terraform destroy'
       inputs:
-        azureSubscription: '$(azureServiceConnectionId)'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -e
-          TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/test"
-          cd "$TF_DIR"
-          terraform init -input=false
-          terraform destroy -auto-approve -input=false -lock-timeout=5m
+        provider: 'azurerm'
+        command: 'destroy'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
