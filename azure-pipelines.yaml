@@ -34,20 +34,30 @@ stages:
       inputs:
         terraformVersion: '1.13.1'
 
-    # تأكيد أن ملفات التيرافورم موجودة (مطابقة لهيكل صاحبتك)
+    # تنظيف أي تهيئة قديمة للباكإند قبل init
     - task: Bash@3
-      displayName: 'Debug: list terraform folder'
+      displayName: 'Clean .terraform (ensure re-init)'
       inputs:
         targetType: inline
         script: |
           set -e
-          ls -la $(System.DefaultWorkingDirectory)/terraform/environments/test
+          rm -rf "$(System.DefaultWorkingDirectory)/terraform/environments/test/.terraform"
+
+    # تأكيد أن ملفات ومسارات التيرافورم صحيحة
+    - task: Bash@3
+      displayName: 'Debug: list terraform folder and modules'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+          echo "---- env test ----"
+          ls -la "$(System.DefaultWorkingDirectory)/terraform/environments/test"
           echo "---- modules/appservice ----"
-          ls -la $(System.DefaultWorkingDirectory)/terraform/environments/test/modules/appservice || true
+          ls -la "$(System.DefaultWorkingDirectory)/terraform/modules/appservice" || true
           echo "---- modules/network ----"
-          ls -la $(System.DefaultWorkingDirectory)/terraform/environments/test/modules/network || true
+          ls -la "$(System.DefaultWorkingDirectory)/terraform/modules/network" || true
           echo "---- terraform.tfvars ----"
-          sed -n '1,200p' $(System.DefaultWorkingDirectory)/terraform/environments/test/terraform.tfvars
+          sed -n '1,200p' "$(System.DefaultWorkingDirectory)/terraform/environments/test/terraform.tfvars"
 
     # نضمن وجود تخزين backend (SA + container)
     - task: AzureCLI@2
@@ -69,7 +79,7 @@ stages:
           az storage container create --name tfstate --account-name "$SA" --auth-mode key --account-key "$KEY" >/dev/null
           echo "Backend ready."
 
-    # init على نفس مسار الموديولات
+    # terraform init باستخدام Service Connection (بدون MSI)
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
       displayName: 'Terraform init'
       inputs:
@@ -90,6 +100,7 @@ stages:
         provider: 'azurerm'
         command: 'validate'
         workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
 
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
       displayName: 'Terraform apply'
@@ -97,6 +108,7 @@ stages:
         provider: 'azurerm'
         command: 'apply'
         workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        commandOptions: '-auto-approve'
         environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
 
     # Postman
@@ -279,4 +291,5 @@ stages:
         provider: 'azurerm'
         command: 'destroy'
         workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        commandOptions: '-auto-approve'
         environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
