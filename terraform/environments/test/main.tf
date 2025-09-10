@@ -20,7 +20,7 @@ data "azurerm_resource_group" "rg" {
 
 # --------- Network module ----------
 module "network" {
-  source              = "./modules/network"
+  source              = "../../modules/network"
   resource_group_name = data.azurerm_resource_group.rg.name
   location            = var.location
 
@@ -31,7 +31,7 @@ module "network" {
 
 # --------- App Service module ----------
 module "appservice" {
-  source              = "./modules/appservice"
+  source              = "../../modules/appservice"
   resource_group_name = data.azurerm_resource_group.rg.name
   location            = var.location
 
@@ -44,4 +44,4 @@ module "appservice" {
 output "app_default_hostname" {
   value = module.appservice.app_default_hostname
 }
-#تجربه 
+#تجربه

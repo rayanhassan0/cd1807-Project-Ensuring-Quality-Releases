@@ -1,3 +1,7 @@
-output "subnet_id_test" {
-  value = "${azurerm_subnet.test.id}"
+output "vnet_name" {
+  value = azurerm_virtual_network.vnet.name
+}
+
+output "subnet_test_id" {
+  value = azurerm_subnet.subnet_test.id
 }
