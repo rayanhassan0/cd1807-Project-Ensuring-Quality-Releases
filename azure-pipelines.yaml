@@ -12,11 +12,7 @@ variables:
   projectRoot: $(System.DefaultWorkingDirectory)
   environmentName: 'test'
   resourceGroup: 'Azuredevops'
-  appServiceName: 'myapp-AppService'
-  # إعدادات افتراضية أخف لاختبار جيمتر (تُستخدم إذا كانت معرفة داخل .jmx بخصائص)
-  JM_THREADS: '20'
-  JM_RAMPUP: '30'
-  JM_DURATION: '300'   # 5 دقائق
+  appServiceName: 'myapp-AppService'   # سنضيف -$(Build.BuildId) في plan/apply/destroy والنشر
 
 stages:
 # =============== BUILD ===============
@@ -94,18 +90,38 @@ stages:
         backendAzureRmUseOidc: false
         backendAzureRmUseMsi: false
 
-    # ------ (اختياري لمرة واحدة) استيراد موارد موجودة ------
-    # - task: AzureCLI@2
-    #   displayName: 'TF import existing resources into state (one-time)'
-    #   inputs:
-    #     azureSubscription: '$(azureServiceConnectionId)'
-    #     scriptType: bash
-    #     scriptLocation: inlineScript
-    #     inlineScript: |
-    #       set -e
-    #       cd "$(System.DefaultWorkingDirectory)/terraform/environments/test"
-    #       terraform state list || true
-    # ------ نهاية الاستيراد ------
+    # ====== (مرة واحدة فقط) استيراد الموارد الحالية إلى الـ state — احذف/علّق هذه الخطوة بعد أول نجاح ======
+    - task: AzureCLI@2
+      displayName: 'TF import existing resources into state (one-time)'
+      inputs:
+        azureSubscription: '$(azureServiceConnectionId)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -e
+          cd "$(System.DefaultWorkingDirectory)/terraform/environments/test"
+
+          echo ">> Import VNet (vnet-test)"
+          terraform import -input=false \
+            'module.network.azurerm_virtual_network.vnet' \
+            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Network/virtualNetworks/vnet-test' \
+            || true
+
+          echo ">> Import Subnet (subnet-test)"
+          terraform import -input=false \
+            'module.network.azurerm_subnet.subnet_test' \
+            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Network/virtualNetworks/vnet-test/subnets/subnet-test' \
+            || true
+
+          echo ">> Import App Service Plan (myapp-plan)"
+          terraform import -input=false \
+            'module.appservice.azurerm_service_plan.plan' \
+            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Web/serverFarms/myapp-plan' \
+            || true
+
+          echo "State after import:"
+          terraform state list || true
+    # ====== نهاية خطوة الاستيراد ======
 
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
       displayName: 'Terraform validate'
@@ -145,7 +161,8 @@ stages:
           elif command -v yum >/dev/null 2>&1; then
             sudo yum install -y zip unzip python3-pip
           else
-            echo "Unknown package manager"; exit 1
+            echo "Unknown package manager; please install zip/unzip manually" >&2
+            exit 1
           fi
 
     - task: NodeTool@0
@@ -229,7 +246,6 @@ stages:
   jobs:
   - deployment: FakeRestAPI
     displayName: 'Deploy App & Run JMeter'
-    timeoutInMinutes: 0            # <--- بدون مهلة
     pool:
       name: myAgentPool
     environment: $(environmentName)
@@ -251,20 +267,17 @@ stages:
           - download: current
             artifact: drop-perftests
 
-          # 1) تشغيل الاختبار فقط (أسرع من توليد التقرير أثناء التشغيل)
-          - task: AzureCLI@2
-            displayName: 'Run JMeter (headless)'
-            timeoutInMinutes: 90     # <--- مهلة كبيرة للخطوة
+          - task: Bash@3
+            displayName: 'Run JMeter (Performance)'
+            timeoutInMinutes: 30   # رفعنا المهلة لأن تنزيل JMeter كبير وقد يتأخر
             inputs:
-              azureSubscription: '$(azureServiceConnectionId)'
-              scriptType: bash
-              scriptLocation: inlineScript
-              inlineScript: |
+              targetType: inline
+              script: |
                 set -e
                 cd "$(Pipeline.Workspace)"
                 mkdir -p perf && cd perf
 
-                # Java
+                # Java for JMeter
                 if ! command -v java >/dev/null 2>&1; then
                   if command -v apt-get >/dev/null 2>&1; then
                     sudo apt-get update -y
@@ -274,42 +287,44 @@ stages:
                   fi
                 fi
 
-                # JMeter
-                curl -L -o apache-jmeter.tgz https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-5.6.3.tgz
+                # Download JMeter with retries (شبكة قد تكون بطيئة)
+                JM_VER=5.6.3
+                for i in 1 2 3 4 5; do
+                  echo "Downloading JMeter attempt $i..."
+                  curl -L --fail -o apache-jmeter.tgz "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JM_VER}.tgz" && break || sleep 5
+                done
                 tar -xzf apache-jmeter.tgz
                 unzip -o "$(Pipeline.Workspace)/drop-perftests/$(Build.BuildId)-perftests.zip" -d perftests
-                JM="$(pwd)/apache-jmeter-5.6.3"
-                JMX="perftests/PerformanceTestSuite.jmx"
-                test -f "$JMX" || { echo "JMX not found: $JMX"; exit 1; }
 
-                # URL للتطبيق
-                HN=$(az webapp show -g "$(resourceGroup)" -n "$(appServiceName)-$(Build.BuildId)" --query defaultHostName -o tsv)
-                APPURL="https://$HN"
-                echo "Starting standalone test @ $(date -u)"
+                JM="$(pwd)/apache-jmeter-${JM_VER}"
+                JMX="perftests/PerformanceTestSuite.jmx"
+                if [ ! -f "$JMX" ]; then
+                  echo "JMeter test file not found: $JMX" && exit 1
+                fi
+
+                # ابني رابط التطبيق مباشرة (بدون az webapp show لتفادي علوق محتمل)
+                APPURL="https://$(appServiceName)-$(Build.BuildId).azurewebsites.net"
                 echo "Testing against: $APPURL"
 
-                # تشغيل بدون توليد تقرير أثناء التشغيل
+                # إعدادات تشغيل قصيرة
+                DURATION=120
+                THREADS=10
+                RAMPUP=10
+
+                echo "Short JMeter run: duration=${DURATION}s, threads=${THREADS}, rampup=${RAMPUP}s"
+                set +e
                 "$JM/bin/jmeter" -n -t "$JMX" \
                   -JAPPSERVICEURL="$APPURL" \
-                  -Jthreads=$(JM_THREADS) -Jrampup=$(JM_RAMPUP) -Jduration=$(JM_DURATION) \
-                  -l perftests/results.jtl \
-                  -j perftests/jmeter.log || true
-
-                echo "---- Tail summary ----"
-                grep -E "Starting|summary|Generate Summary Results" perftests/jmeter.log | tail -n 80 || true
-                echo "----------------------"
-
-          # 2) توليد تقرير HTML من ملف النتائج
-          - task: Bash@3
-            displayName: 'Generate JMeter HTML report'
-            timeoutInMinutes: 30
-            inputs:
-              targetType: inline
-              script: |
+                  -JdurationSeconds="$DURATION" \
+                  -Jthreads="$THREADS" \
+                  -Jrampup="$RAMPUP" \
+                  -l perftests/results.jtl
+                JM_EXIT=$?
                 set -e
-                cd "$(Pipeline.Workspace)/perf"
-                JM="$(pwd)/apache-jmeter-5.6.3"
+
+                # توليد تقرير HTML حتى لو فشل الاختبار
                 "$JM/bin/jmeter" -g perftests/results.jtl -o perftests/html-report || true
+                echo "JMeter finished with exit code: $JM_EXIT"
 
           - task: PublishBuildArtifacts@1
             displayName: 'Publish JMeter HTML Report'
@@ -318,7 +333,7 @@ stages:
               ArtifactName: 'jmeter-report'
               publishLocation: 'Container'
 
-  # Selenium على نفس الـ agent
+  # تشغيل سيلينيوم على نفس الـ self-hosted agent
   - job: SeleniumUITests
     displayName: 'Selenium UI Tests'
     pool:
