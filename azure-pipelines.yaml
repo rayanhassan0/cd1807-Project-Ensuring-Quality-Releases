@@ -12,7 +12,7 @@ variables:
   projectRoot: $(System.DefaultWorkingDirectory)
   environmentName: 'test'
   resourceGroup: 'Azuredevops'
-  appServiceName: 'myapp-AppService'   # سيضاف لها -$(Build.BuildId) في plan/apply/destroy
+  appServiceName: 'myapp-AppService'   # سيضاف لها -$(Build.BuildId) في plan/apply/destroy ونستخدمها في النشر أيضاً
 
 stages:
 # =============== BUILD ===============
@@ -94,7 +94,7 @@ stages:
         backendAzureRmUseOidc: false
         backendAzureRmUseMsi: false
 
-    # ====== (جديد) استيراد الموارد الحالية إلى الـ state — احذفها بعد أول نجاح ======
+    # ====== (مرة واحدة فقط) استيراد الموارد الحالية إلى الـ state — احذفها بعد أول نجاح ======
     - task: AzureCLI@2
       displayName: 'TF import existing resources into state (one-time)'
       inputs:
@@ -249,7 +249,8 @@ stages:
             displayName: 'Deploy Azure Web App'
             inputs:
               azureSubscription: '$(azureServiceConnectionId)'
-              appName: '$(appServiceName)'
+              # النشر على نفس الاسم الفريد الذي أنشأه Terraform
+              appName: '$(appServiceName)-$(Build.BuildId)'
               appType: 'webApp'
               package: '$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip'
 
@@ -272,7 +273,8 @@ stages:
                 if [ ! -f "$JMX" ]; then
                   echo "JMeter test file not found: $JMX" && exit 1
                 fi
-                HN=$(az webapp show -g "$(resourceGroup)" -n "$(appServiceName)" --query defaultHostName -o tsv)
+                # استخدم الاسم الفريد نفسه للحصول على الـ URL
+                HN=$(az webapp show -g "$(resourceGroup)" -n "$(appServiceName)-$(Build.BuildId)" --query defaultHostName -o tsv)
                 APPURL="https://$HN"
                 echo "Testing against: $APPURL"
                 "$JM/bin/jmeter" -n -t "$JMX" -JAPPSERVICEURL="$APPURL" -l perftests/results.jtl -e -o perftests/html-report || true
@@ -291,8 +293,8 @@ stages:
       name: myAgentPool
     environment:
       name: $(environmentName)
-    resourceType: VirtualMachine
-    tags: selenium
+      resourceType: VirtualMachine
+      tags: selenium
     strategy:
       runOnce:
         deploy:
