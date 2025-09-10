@@ -155,7 +155,13 @@ stages:
         commandOptions: '-auto-approve -var="app_service_name=$(appServiceName)-$(Build.BuildId)"'
         environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
 
-    # Postman
+    # ====== Node.js for Newman (جديد) ======
+    - task: NodeTool@0
+      displayName: 'Use Node.js 18.x'
+      inputs:
+        versionSpec: '18.x'
+
+    # Postman (Newman)
     - task: CmdLine@2
       displayName: 'Install Newman'
       inputs:
