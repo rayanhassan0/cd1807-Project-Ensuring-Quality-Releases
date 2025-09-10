@@ -12,7 +12,7 @@ variables:
   projectRoot: $(System.DefaultWorkingDirectory)
   environmentName: 'test'
   resourceGroup: 'Azuredevops'
-  appServiceName: 'myapp-AppService'
+  appServiceName: 'myapp-AppService'   # سيضاف لها -$(Build.BuildId) في plan/apply/destroy
 
 stages:
 # =============== BUILD ===============
@@ -102,13 +102,24 @@ stages:
         workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
         environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
 
+    # (جديد) Terraform plan مع تمرير اسم فريد للتطبيق
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+      displayName: 'Terraform plan'
+      inputs:
+        provider: 'azurerm'
+        command: 'plan'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        commandOptions: '-out=tfplan -var="app_service_name=$(appServiceName)-$(Build.BuildId)"'
+        environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
+
+    # Terraform apply مع نفس ال-var
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
       displayName: 'Terraform apply'
       inputs:
         provider: 'azurerm'
         command: 'apply'
         workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
-        commandOptions: '-auto-approve'
+        commandOptions: '-auto-approve -var="app_service_name=$(appServiceName)-$(Build.BuildId)"'
         environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
 
     # Postman
@@ -291,5 +302,5 @@ stages:
         provider: 'azurerm'
         command: 'destroy'
         workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
-        commandOptions: '-auto-approve'
+        commandOptions: '-auto-approve -var="app_service_name=$(appServiceName)-$(Build.BuildId)"'
         environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
