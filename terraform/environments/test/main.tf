@@ -1,47 +1,46 @@
-﻿provider "azurerm" {
+﻿terraform {
+  required_version = ">= 1.2.0"
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 3.110"
+    }
+  }
+}
+
+provider "azurerm" {
   features {}
+  # المصادقة تجي من Service Connection في Azure Pipelines (ARM_* env vars)
 }
 
-terraform {
-  
+# نستخدم الـ RG الموجود مسبقًا (الاسم جاي من tfvars)
+data "azurerm_resource_group" "rg" {
+  name = var.resource_group_name
 }
-module "resource_group" {
-  source               = "../../modules/resource_group"
-  resource_group       = "${var.resource_group}"
-  location             = "${var.location}"
-}
+
+# --------- Network module ----------
 module "network" {
-  source               = "../../modules/network"
-  address_space        = "${var.address_space}"
-  location             = "${var.location}"
-  virtual_network_name = "${var.virtual_network_name}"
-  application_type     = "${var.application_type}"
-  resource_type        = "NET"
-  resource_group       = "${module.resource_group.resource_group_name}"
-  address_prefix_test  = "${var.address_prefix_test}"
+  source              = "./modules/network"
+  resource_group_name = data.azurerm_resource_group.rg.name
+  location            = var.location
+
+  virtual_network_name = var.virtual_network_name
+  address_space        = var.address_space
+  address_prefix_test  = var.address_prefix_test
 }
 
-module "nsg-test" {
-  source           = "../../modules/networksecuritygroup"
-  location         = "${var.location}"
-  application_type = "${var.application_type}"
-  resource_type    = "NSG"
-  resource_group   = "${module.resource_group.resource_group_name}"
-  subnet_id        = "${module.network.subnet_id_test}"
-  address_prefix_test = "${var.address_prefix_test}"
-}
+# --------- App Service module ----------
 module "appservice" {
-  source           = "../../modules/appservice"
-  location         = "${var.location}"
-  application_type = "${var.application_type}"
-  resource_type    = "AppService"
-  resource_group   = "${module.resource_group.resource_group_name}"
-}
-module "publicip" {
-  source           = "../../modules/publicip"
-  location         = "${var.location}"
-  application_type = "${var.application_type}"
-  resource_type    = "publicip"
-  resource_group   = "${module.resource_group.resource_group_name}"
+  source              = "./modules/appservice"
+  resource_group_name = data.azurerm_resource_group.rg.name
+  location            = var.location
+
+  application_type    = var.application_type
+  app_service_name    = var.app_service_name
+  app_service_sku     = var.app_service_sku
+  app_service_os_type = var.app_service_os_type
 }
 
+output "app_default_hostname" {
+  value = module.appservice.app_default_hostname
+}

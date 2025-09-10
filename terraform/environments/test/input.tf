@@ -1,9 +1,13 @@
-# Resource Group / Location
-variable "location" {}
-variable "resource_group" {}
-variable "application_type" {}
+variable "location"            { type = string }
+variable "resource_group_name" { type = string }
+variable "application_type"    { type = string }
 
-# Network
-variable "virtual_network_name" {}
-variable "address_prefix_test" {}
-variable "address_space" {}
+# شبكة
+variable "virtual_network_name" { type = string }
+variable "address_space"        { type = list(string) }
+variable "address_prefix_test"  { type = string }
+
+# App Service
+variable "app_service_name"    { type = string }  # لازم يطابق azure-pipelines.yaml
+variable "app_service_sku"     { type = string }  # مثال: S1
+variable "app_service_os_type" { type = string }  # مثال: Linux
