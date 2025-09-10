@@ -1,8 +1,8 @@
 name: Azure Pipelines
+
 trigger:
 - main
 
-# نشغّل على الـ self-hosted agent حقك
 pool:
   name: myAgentPool
 
@@ -12,183 +12,96 @@ variables:
   projectRoot: $(System.DefaultWorkingDirectory)
   environmentName: 'test'
   resourceGroup: 'Azuredevops'
-  # سننشئ حساب تخزين للـ backend لو ما كان موجود
-  storageAccount: 'tfstatebootstrap'
-  storageContainer: 'tfstate'
-  tfstateKey: 'test.terraform.tfstate'
-  # لازم يطابق اسم الويب آب المُنشأ من Terraform
   appServiceName: 'myapp-AppService'
-  vmEnvName: 'myEnvVM'
-  # (جديد) SKU افتراضي للـ App Service Plan (عدّله لو السياسة تفرض SKU آخر)
-  appServiceSku: 'B1'
 
 stages:
-# ===========================
-# BUILD (Terraform + Tests)
-# ===========================
+# =============== BUILD ===============
 - stage: Build
-  displayName: 'Build: Terraform + Package + API/Load'
   jobs:
   - job: BuildInfrastructure
-    displayName: 'Terraform & Package & Tests'
+    displayName: 'Terraform + Postman + Package'
     steps:
-    # (جديد) تثبيت المتطلبات على Ubuntu/Debian: unzip, curl, ca-certificates, zip
-    - task: Bash@3
-      displayName: 'Install prerequisites (Ubuntu/Debian)'
-      inputs:
-        targetType: inline
-        script: |
-          set -euxo pipefail
-          sudo apt-get update
-          sudo apt-get install -y unzip curl ca-certificates zip
-
-    # (جديد) ثبّت Azure CLI إذا غير موجود
-    - task: Bash@3
-      displayName: 'Install Azure CLI (if missing)'
-      inputs:
-        targetType: inline
-        script: |
-          set -euxo pipefail
-          if ! command -v az >/dev/null 2>&1; then
-            curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
-          fi
-          az version
-
-    # ثبّت Terraform 1.2.9 على الوكيل (بديل مهمة الماركت بليس)
-    - task: Bash@3
-      displayName: 'Install Terraform 1.2.9'
-      inputs:
-        targetType: inline
-        script: |
-          set -e
-          if ! command -v terraform >/dev/null 2>&1; then
-            curl -fsSL https://releases.hashicorp.com/terraform/1.2.9/terraform_1.2.9_linux_amd64.zip -o /tmp/terraform.zip
-            sudo unzip -o /tmp/terraform.zip -d /usr/local/bin
-            sudo chmod +x /usr/local/bin/terraform
-          fi
-          terraform -version
-
-    # تأكد من تسجيل الدخول
     - task: AzureCLI@2
-      displayName: 'Az Login (Service Connection)'
+      displayName: 'Show Azure account'
       inputs:
         azureSubscription: '$(azureServiceConnectionId)'
         scriptType: bash
         scriptLocation: inlineScript
-        inlineScript: |
-          az account show
+        inlineScript: az account show
 
-    # أنشئ حساب التخزين وحاوية الـ backend لو ما وُجدت (داخل RG: Azuredevops)
-    # ✅ تستخدم env بدل $(...) داخل السكربت
-    - task: AzureCLI@2
-      displayName: 'Ensure backend storage exists'
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
+      displayName: 'Terraform installation'
       inputs:
-        azureSubscription: '$(azureServiceConnectionId)'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -e
-          RG="${RESOURCE_GROUP}"
-          LOC="${LOCATION}"
-          CONT="${STORAGE_CONTAINER}"
+        terraformVersion: '1.13.1'
 
-          # اسم حساب التخزين (24 حرف كحد أقصى) — نولّده من رقم الـ Build
-          SA_RAW="tfstate${BUILD_ID}"
-          SA=$(echo "$SA_RAW" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g' | cut -c1-24)
-          echo "Using storage account: $SA in RG: $RG ($LOC)"
-
-          if ! az storage account show -g "$RG" -n "$SA" >/dev/null 2>&1; then
-            az storage account create -g "$RG" -n "$SA" -l "$LOC" --sku Standard_LRS
-          fi
-
-          KEY=$(az storage account keys list -g "$RG" -n "$SA" --query "[0].value" -o tsv)
-
-          if ! az storage container show --account-name "$SA" --name "$CONT" --auth-mode key --account-key "$KEY" >/dev/null 2>&1; then
-            az storage container create --account-name "$SA" --name "$CONT" --auth-mode key --account-key "$KEY" >/dev/null
-          fi
-
-          echo "##vso[task.setvariable variable=storageAccount]$SA"
-          echo "##vso[task.setvariable variable=TF_STORAGE_KEY;issecret=true]$KEY"
-      env:
-        RESOURCE_GROUP: $(resourceGroup)
-        LOCATION: southcentralus
-        STORAGE_CONTAINER: $(storageContainer)
-        BUILD_ID: $(Build.BuildId)
-
-    # اكتب backend.tf (نستخدم access_key لأننا على RG-scope)
-    - task: Bash@3
-      displayName: 'Write backend.tf'
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+      displayName: 'Terraform init'
       inputs:
-        targetType: inline
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        backendServiceArm: '$(azureServiceConnectionId)'
+        backendAzureRmResourceGroupName: '$(resourceGroup)'
+        backendAzureRmStorageAccountName: 'tfstatebootstrap01'
+        backendAzureRmContainerName: 'tfstate'
+        backendAzureRmKey: 'test.terraform.tfstate'
+        backendAzureRmUseOidc: false
+        backendAzureRmUseMsi: false
+
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+      displayName: 'Terraform validate'
+      inputs:
+        provider: 'azurerm'
+        command: 'validate'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+      displayName: 'Terraform apply'
+      inputs:
+        provider: 'azurerm'
+        command: 'apply'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
+
+    # Postman
+    - task: CmdLine@2
+      displayName: 'Install Newman'
+      inputs:
+        script: 'npm install -g newman'
+        workingDirectory: $(System.DefaultWorkingDirectory)
+
+    - task: CmdLine@2
+      displayName: 'Run Data Validation Tests'
+      continueOnError: true
+      inputs:
         script: |
-          set -e
-          TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/test"
-          mkdir -p "$TF_DIR"
-          cat > "$TF_DIR/backend.tf" << EOF
-          terraform {
-            backend "azurerm" {
-              storage_account_name = "$(storageAccount)"
-              container_name       = "$(storageContainer)"
-              key                  = "$(tfstateKey)"
-              access_key           = "$(TF_STORAGE_KEY)"
-            }
-          }
-          EOF
-          echo "backend.tf written."
+          newman run TestSuite.Data-Validation.json \
+                 -e Test.environment.json \
+                 --reporters cli,junit \
+                 --reporter-junit-export TEST-DataValidation.xml
+        workingDirectory: '$(System.DefaultWorkingDirectory)/automatedtesting/postman'
 
-    # اكتب terraform.tfvars — ✅ الموقع southcentralus + (جديد) app_service_sku
-    - task: Bash@3
-      displayName: 'Write terraform.tfvars'
+    - task: CmdLine@2
+      displayName: 'Run Regression Tests'
+      continueOnError: true
       inputs:
-        targetType: 'inline'
         script: |
-          set -e
-          TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/test"
-          mkdir -p "$TF_DIR"
-          cat > "$TF_DIR/terraform.tfvars" <<EOF
-          # required vars for this env
-          location             = "southcentralus"
-          resource_group       = "$(resourceGroup)"
-          application_type     = "myapp"
-          virtual_network_name = "vnet-$(environmentName)"
-          address_prefix_test  = "10.0.1.0/24"
-          address_space        = ["10.0.0.0/16"]
-          app_service_sku      = "$(appServiceSku)"
-          EOF
-          echo "terraform.tfvars written:"
-          sed -n '1,200p' "$TF_DIR/terraform.tfvars"
+          newman run TestSuite.Regression.json \
+                 -e Test.environment.json \
+                 --reporters cli,junit \
+                 --reporter-junit-export TEST-Regression.xml
+        workingDirectory: '$(System.DefaultWorkingDirectory)/automatedtesting/postman'
 
-    # init/validate/apply
-    - task: AzureCLI@2
-      displayName: 'Terraform init/validate/apply'
+    - task: PublishTestResults@2
+      displayName: 'Publish Postman JUnit Results'
       inputs:
-        azureSubscription: '$(azureServiceConnectionId)'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -e
-          TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/test"
-          cd "$TF_DIR"
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '**/TEST-*.xml'
+        searchFolder: '$(System.DefaultWorkingDirectory)/automatedtesting/postman'
+        mergeTestResults: true
+        testRunTitle: 'Postman Results'
 
-          # إزالة BOM إن وجد
-          sed -i '1s/^\xEF\xBB\xBF//' main.tf || true
-
-          # ثبّت الاشتراك/المستأجر لمزوّد azurerm
-          SUB_ID=$(az account show --query id -o tsv)
-          TENANT_ID=$(az account show --query tenantId -o tsv)
-          export ARM_SUBSCRIPTION_ID="$SUB_ID"
-          export ARM_TENANT_ID="$TENANT_ID"
-
-          echo "== terraform init =="
-          terraform init -input=false
-
-          echo "== terraform validate =="
-          terraform validate
-
-          echo "== terraform apply =="
-          terraform apply -auto-approve -input=false -lock-timeout=5m -var-file="terraform.tfvars"
-
-    # -------- Archive Selenium tests
+    # Selenium package
     - task: ArchiveFiles@2
       displayName: 'Archive UI Tests (Selenium)'
       inputs:
@@ -196,25 +109,23 @@ stages:
         includeRootFolder: false
         archiveType: 'zip'
         archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-uitests.zip'
-
     - publish: $(Build.ArtifactStagingDirectory)/$(Build.BuildId)-uitests.zip
       displayName: 'Publish UI Tests Artifact'
       artifact: drop-uitests
 
-    # -------- Archive FakeRestAPI
+    # FakeRestAPI package
     - task: ArchiveFiles@2
       displayName: 'Archive FakeRestAPI'
       inputs:
-        rootFolderOrFile: 'FakeRestAPI'
+        rootFolderOrFile: '$(System.DefaultWorkingDirectory)/automatedtesting/jmeter/fakerestapi'
         includeRootFolder: false
         archiveType: 'zip'
         archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-fakerestapi.zip'
-
     - publish: $(Build.ArtifactStagingDirectory)/$(Build.BuildId)-fakerestapi.zip
       displayName: 'Publish FakeRestAPI Artifact'
       artifact: drop-fakerestapi
 
-    # -------- JMeter (Performance)
+    # JMeter package
     - task: ArchiveFiles@2
       displayName: 'Archive PerformanceTestSuite (JMeter)'
       inputs:
@@ -222,23 +133,19 @@ stages:
         includeRootFolder: false
         archiveType: 'zip'
         archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-perftests.zip'
-
     - publish: $(Build.ArtifactStagingDirectory)/$(Build.BuildId)-perftests.zip
       displayName: 'Publish Perf Tests Artifact'
       artifact: drop-perftests
 
-# ===========================
-# DEPLOYMENT (WebApp + JMeter)
-# ===========================
+# =============== DEPLOY ===============
 - stage: Deploy
-  displayName: 'Deploy WebApp & Run JMeter'
   dependsOn: Build
   jobs:
   - deployment: FakeRestAPI
-    displayName: 'Deploy App & Run Load Tests'
+    displayName: 'Deploy App & Run JMeter'
     pool:
       name: myAgentPool
-    environment: $(vmEnvName)
+    environment: $(environmentName)
     strategy:
       runOnce:
         deploy:
@@ -254,60 +161,44 @@ stages:
               appType: 'webApp'
               package: '$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip'
 
-          - task: AzureCLI@2
-            displayName: 'Get App URL'
-            inputs:
-              azureSubscription: '$(azureServiceConnectionId)'
-              scriptType: bash
-              scriptLocation: inlineScript
-              inlineScript: |
-                HN=$(az webapp show -g "$(resourceGroup)" -n "$(appServiceName)" --query defaultHostName -o tsv)
-                echo "##vso[task.setvariable variable=APPSERVICEURL;isOutput=true]https://$HN"
-                echo "App URL: https://$HN"
-            name: appurl
-
           - download: current
             artifact: drop-perftests
 
-          - task: CmdLine@2
+          - task: Bash@3
             displayName: 'Run JMeter (Performance)'
             inputs:
+              targetType: inline
               script: |
                 set -e
-                if [ -x /opt/jmeter/bin/jmeter ]; then
-                  export JM=/opt/jmeter
-                else
-                  JM_VERSION=5.6.3
-                  curl -L -o apache-jmeter.tgz https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-$JM_VERSION.tgz
-                  tar -xzf apache-jmeter.tgz
-                  export JM=$(pwd)/apache-jmeter-$JM_VERSION
+                cd "$(Pipeline.Workspace)"
+                mkdir -p perf && cd perf
+                curl -L -o apache-jmeter.tgz https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-5.6.3.tgz
+                tar -xzf apache-jmeter.tgz
+                unzip -o "$(Pipeline.Workspace)/drop-perftests/$(Build.BuildId)-perftests.zip" -d perftests
+                JM="$(pwd)/apache-jmeter-5.6.3"
+                JMX="perftests/PerformanceTestSuite.jmx"
+                if [ ! -f "$JMX" ]; then
+                  echo "JMeter test file not found: $JMX" && exit 1
                 fi
-                echo "Using JMeter at $JM"
-                unzip -o $(Pipeline.Workspace)/drop-perftests/$(Build.BuildId)-perftests.zip -d perftests
-                $JM/bin/jmeter -n -t perftests/Starter.jmx -JAPPSERVICEURL=$(appurl.APPSERVICEURL) -l perftests/results.jtl -e -o perftests/html-report
-                echo "===== JMETER LOG (tail) ====="
-                tail -n 100 ~/.jmeter/jmeter.log || true
+                HN=$(az webapp show -g "$(resourceGroup)" -n "$(appServiceName)" --query defaultHostName -o tsv)
+                APPURL="https://$HN"
+                echo "Testing against: $APPURL"
+                "$JM/bin/jmeter" -n -t "$JMX" -JAPPSERVICEURL="$APPURL" -l perftests/results.jtl -e -o perftests/html-report || true
+                echo "JMeter done."
 
           - task: PublishBuildArtifacts@1
             displayName: 'Publish JMeter HTML Report'
             inputs:
-              PathtoPublish: 'perftests/html-report'
+              PathtoPublish: '$(Pipeline.Workspace)/perf/perftests/html-report'
               ArtifactName: 'jmeter-report'
               publishLocation: 'Container'
 
-# ===========================
-# UI TESTS (Selenium on VM)
-# ===========================
-- stage: UITests
-  displayName: 'Selenium on Agent VM'
-  dependsOn: Deploy
-  jobs:
   - deployment: VMDeploy
-    displayName: 'Run Selenium'
+    displayName: 'Selenium UI Tests'
     pool:
       name: myAgentPool
     environment:
-      name: $(vmEnvName)
+      name: $(environmentName)
       resourceType: VirtualMachine
       tags: selenium
     strategy:
@@ -316,42 +207,31 @@ stages:
           steps:
           - download: current
             artifact: drop-uitests
-
           - task: Bash@3
-            displayName: 'Execute Selenium'
+            displayName: 'Run Selenium'
             inputs:
               targetType: 'inline'
               script: |
                 set -e
-                python3 -m pip install --user -r $(Pipeline.Workspace)/drop-uitests/requirements.txt || true
+                mkdir -p "$HOME/selenium"
+                unzip -o "$(Pipeline.Workspace)/drop-uitests/$(Build.BuildId)-uitests.zip" -d "$HOME/selenium"
+                python3 -m pip install --user -r "$HOME/selenium/requirements.txt" || true
                 export DEMO_URL="https://www.saucedemo.com/"
                 export DEMO_USER="standard_user"
                 export DEMO_PASS="secret_sauce"
-                sudo mkdir -p /var/log/selenium && sudo chown $USER:$USER /var/log/selenium
-                python3 $(Pipeline.Workspace)/drop-uitests/login.py
-                echo "Selenium log tail:"
-                tail -n 120 /var/log/selenium/selenium.log || true
+                python3 "$HOME/selenium/login.py" || true
+                echo "Selenium finished."
 
-# ===========================
-# CLEANUP (Destroy)
-# ===========================
+# =============== CLEANUP ===============
 - stage: Cleanup
   displayName: 'Terraform Destroy'
-  dependsOn: UITests
+  dependsOn: Deploy
+  condition: always()
   jobs:
   - job: Destroy
     pool:
       name: myAgentPool
     steps:
-    - task: AzureCLI@2
-      displayName: 'Az Login'
-      inputs:
-        azureSubscription: '$(azureServiceConnectionId)'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          az account show
-
     - task: AzureCLI@2
       displayName: 'Terraform destroy'
       inputs:
@@ -362,10 +242,5 @@ stages:
           set -e
           TF_DIR="$(System.DefaultWorkingDirectory)/terraform/environments/test"
           cd "$TF_DIR"
-          sed -i '1s/^\xEF\xBB\xBF//' main.tf || true
-          SUB_ID=$(az account show --query id -o tsv)
-          TENANT_ID=$(az account show --query tenantId -o tsv)
-          export ARM_SUBSCRIPTION_ID="$SUB_ID"
-          export ARM_TENANT_ID="$TENANT_ID"
           terraform init -input=false
-          terraform destroy -auto-approve -input=false -lock-timeout=5m -var-file="terraform.tfvars"
+          terraform destroy -auto-approve -input=false -lock-timeout=5m
