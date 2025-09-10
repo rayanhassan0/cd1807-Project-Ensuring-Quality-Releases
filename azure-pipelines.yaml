@@ -94,6 +94,39 @@ stages:
         backendAzureRmUseOidc: false
         backendAzureRmUseMsi: false
 
+    # ====== (جديد) استيراد الموارد الحالية إلى الـ state — احذفها بعد أول نجاح ======
+    - task: AzureCLI@2
+      displayName: 'TF import existing resources into state (one-time)'
+      inputs:
+        azureSubscription: '$(azureServiceConnectionId)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -e
+          cd "$(System.DefaultWorkingDirectory)/terraform/environments/test"
+
+          echo ">> Import VNet (vnet-test)"
+          terraform import -input=false \
+            'module.network.azurerm_virtual_network.vnet' \
+            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Network/virtualNetworks/vnet-test' \
+            || true
+
+          echo ">> Import Subnet (subnet-test)"
+          terraform import -input=false \
+            'module.network.azurerm_subnet.subnet_test' \
+            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Network/virtualNetworks/vnet-test/subnets/subnet-test' \
+            || true
+
+          echo ">> Import App Service Plan (myapp-plan)"
+          terraform import -input=false \
+            'module.appservice.azurerm_service_plan.plan' \
+            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Web/serverFarms/myapp-plan' \
+            || true
+
+          echo "State after import:"
+          terraform state list || true
+    # ====== نهاية خطوة الاستيراد ======
+
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
       displayName: 'Terraform validate'
       inputs:
@@ -102,7 +135,7 @@ stages:
         workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
         environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
 
-    # (جديد) Terraform plan مع تمرير اسم فريد للتطبيق
+    # Terraform plan مع تمرير اسم فريد للتطبيق
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
       displayName: 'Terraform plan'
       inputs:
@@ -258,8 +291,8 @@ stages:
       name: myAgentPool
     environment:
       name: $(environmentName)
-      resourceType: VirtualMachine
-      tags: selenium
+    resourceType: VirtualMachine
+    tags: selenium
     strategy:
       runOnce:
         deploy:
