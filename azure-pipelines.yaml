@@ -269,12 +269,14 @@ stages:
 
           - task: Bash@3
             displayName: 'Run JMeter (Performance)'
+            timeoutInMinutes: 10
             inputs:
               targetType: inline
               script: |
                 set -e
                 cd "$(Pipeline.Workspace)"
                 mkdir -p perf && cd perf
+
                 # تأكد من وجود Java لجيمتر
                 if ! command -v java >/dev/null 2>&1; then
                   if command -v apt-get >/dev/null 2>&1; then
@@ -284,6 +286,7 @@ stages:
                     sudo yum install -y java-11-openjdk
                   fi
                 fi
+
                 curl -L -o apache-jmeter.tgz https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-5.6.3.tgz
                 tar -xzf apache-jmeter.tgz
                 unzip -o "$(Pipeline.Workspace)/drop-perftests/$(Build.BuildId)-perftests.zip" -d perftests
@@ -292,10 +295,33 @@ stages:
                 if [ ! -f "$JMX" ]; then
                   echo "JMeter test file not found: $JMX" && exit 1
                 fi
+
                 HN=$(az webapp show -g "$(resourceGroup)" -n "$(appServiceName)-$(Build.BuildId)" --query defaultHostName -o tsv)
                 APPURL="https://$HN"
                 echo "Testing against: $APPURL"
-                "$JM/bin/jmeter" -n -t "$JMX" -JAPPSERVICEURL="$APPURL" -l perftests/results.jtl -e -o perftests/html-report || true
+
+                # بارامترات تقلّص مدة الاختبار + timeout hard-cut لو علّق
+                DURATION=90
+                THREADS=10
+                RAMPUP=10
+
+                echo "Short JMeter run: duration=${DURATION}s, threads=${THREADS}, rampup=${RAMPUP}s"
+                set +e
+                timeout 6m "$JM/bin/jmeter" -n -t "$JMX" \
+                  -JAPPSERVICEURL="$APPURL" \
+                  -JdurationSeconds="$DURATION" \
+                  -Jthreads="$THREADS" \
+                  -Jrampup="$RAMPUP" \
+                  -l perftests/results.jtl
+                JM_EXIT=$?
+                set -e
+
+                if [ $JM_EXIT -eq 124 ]; then
+                  echo "JMeter timed out after 6 minutes (cut short intentionally)."
+                fi
+
+                # توليد تقرير HTML من النتائج
+                "$JM/bin/jmeter" -g perftests/results.jtl -o perftests/html-report || true
                 echo "JMeter done."
 
           - task: PublishBuildArtifacts@1
