@@ -9,3 +9,4 @@ address_prefix_test  = "10.0.1.0/24"
 app_service_name    = "myapp-AppService"
 app_service_sku     = "S1"
 app_service_os_type = "Linux"
+# تجربه
