@@ -269,7 +269,7 @@ stages:
 
           - task: Bash@3
             displayName: 'Run JMeter (Performance)'
-            timeoutInMinutes: 30   # رفعنا المهلة لأن تنزيل JMeter كبير وقد يتأخر
+            timeoutInMinutes: 30   # مهلة مناسبة لمرحلة الدبلوي + تحميل JMeter
             inputs:
               targetType: inline
               script: |
@@ -297,24 +297,31 @@ stages:
                 unzip -o "$(Pipeline.Workspace)/drop-perftests/$(Build.BuildId)-perftests.zip" -d perftests
 
                 JM="$(pwd)/apache-jmeter-${JM_VER}"
-                JMX="perftests/PerformanceTestSuite.jmx"
-                if [ ! -f "$JMX" ]; then
-                  echo "JMeter test file not found: $JMX" && exit 1
+
+                # اسم الجيمكس الصحيح بناءً على هيكلة مشروعك (Starter.jmx)
+                if [ -f "perftests/Starter.jmx" ]; then
+                  JMX="perftests/Starter.jmx"
+                elif [ -f "perftests/PerformanceTestSuite.jmx" ]; then
+                  JMX="perftests/PerformanceTestSuite.jmx"
+                else
+                  echo "JMeter JMX not found under perftests/. Expected Starter.jmx" && ls -la perftests && exit 1
                 fi
 
-                # ابني رابط التطبيق مباشرة (بدون az webapp show لتفادي علوق محتمل)
+                # نستخدم اسم المضيف مباشرة من النمط القياسي لتفادي az webapp show
                 APPURL="https://$(appServiceName)-$(Build.BuildId).azurewebsites.net"
                 echo "Testing against: $APPURL"
+                echo "Using JMX: $JMX"
 
                 # إعدادات تشغيل قصيرة
                 DURATION=120
                 THREADS=10
                 RAMPUP=10
 
-                echo "Short JMeter run: duration=${DURATION}s, threads=${THREADS}, rampup=${RAMPUP}s"
                 set +e
                 "$JM/bin/jmeter" -n -t "$JMX" \
                   -JAPPSERVICEURL="$APPURL" \
+                  -JAPP_URL="$APPURL" \
+                  -JBASE_URL="$APPURL" \
                   -JdurationSeconds="$DURATION" \
                   -Jthreads="$THREADS" \
                   -Jrampup="$RAMPUP" \
