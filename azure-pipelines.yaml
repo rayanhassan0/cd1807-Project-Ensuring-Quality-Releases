@@ -162,7 +162,7 @@ stages:
         script: 'npm install -g newman'
         workingDirectory: $(System.DefaultWorkingDirectory)
 
-    # نجهز مجلد ثابت لنتائج Postman
+    # تحضير مجلد ثابت لنتائج Postman
     - task: Bash@3
       displayName: 'Prepare Postman results folder'
       inputs:
@@ -348,6 +348,7 @@ stages:
     steps:
     - download: current
       artifact: drop-uitests
+
     - task: Bash@3
       displayName: 'Run Selenium'
       inputs:
@@ -356,11 +357,22 @@ stages:
           set -e
           mkdir -p "$HOME/selenium"
           unzip -o "$(Pipeline.Workspace)/drop-uitests/$(Build.BuildId)-uitests.zip" -d "$HOME/selenium"
-          python3 -m pip install --user -r "$HOME/selenium/requirements.txt" || true
+
+          # تثبيت متصفح Chromium (إن توفر apt)
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium || true
+          fi
+
+          # ترقية pip وتثبيت المتطلبات
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user -r "$HOME/selenium/requirements.txt"
+
           export DEMO_URL="https://www.saucedemo.com/"
           export DEMO_USER="standard_user"
           export DEMO_PASS="secret_sauce"
-          python3 "$HOME/selenium/login.py" || true
+
+          python3 "$HOME/selenium/login.py"
           echo "Selenium finished."
 
 # =============== CLEANUP ===============
