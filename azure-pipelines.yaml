@@ -269,7 +269,7 @@ stages:
 
           - task: Bash@3
             displayName: 'Run JMeter (Performance)'
-            timeoutInMinutes: 30   # مهلة مناسبة لمرحلة الدبلوي + تحميل JMeter
+            timeoutInMinutes: 30
             inputs:
               targetType: inline
               script: |
@@ -287,7 +287,6 @@ stages:
                   fi
                 fi
 
-                # Download JMeter with retries (شبكة قد تكون بطيئة)
                 JM_VER=5.6.3
                 for i in 1 2 3 4 5; do
                   echo "Downloading JMeter attempt $i..."
@@ -298,7 +297,6 @@ stages:
 
                 JM="$(pwd)/apache-jmeter-${JM_VER}"
 
-                # اسم الجيمكس الصحيح بناءً على هيكلة مشروعك (Starter.jmx أولاً ثم PerformanceTestSuite.jmx)
                 if [ -f "perftests/Starter.jmx" ]; then
                   JMX="perftests/Starter.jmx"
                 elif [ -f "perftests/PerformanceTestSuite.jmx" ]; then
@@ -307,12 +305,10 @@ stages:
                   echo "JMeter JMX not found under perftests/. Expected Starter.jmx" && ls -la perftests && exit 1
                 fi
 
-                # نستخدم اسم المضيف مباشرة لتفادي انتظار az webapp show
                 APPURL="https://$(appServiceName)-$(Build.BuildId).azurewebsites.net"
                 echo "Testing against: $APPURL"
                 echo "Using JMX: $JMX"
 
-                # إعدادات تشغيل قصيرة
                 DURATION=120
                 THREADS=10
                 RAMPUP=10
@@ -329,10 +325,7 @@ stages:
                 JM_EXIT=$?
                 set -e
 
-                # ضَمَن وجود مجلد التقرير دائماً
                 mkdir -p perftests/html-report
-
-                # توليد تقرير HTML إن كانت النتائج موجودة، وإلا أنشئ صفحة بديلة
                 if [ -s perftests/results.jtl ]; then
                   "$JM/bin/jmeter" -g perftests/results.jtl -o perftests/html-report || true
                 else
@@ -348,14 +341,12 @@ stages:
 
                 echo "JMeter finished with exit code: $JM_EXIT"
 
-          # انشر تقرير JMeter (نضمن أن المجلد موجود بأي حال)
           - task: PublishPipelineArtifact@1
             displayName: 'Publish JMeter HTML Report'
             inputs:
               targetPath: '$(Pipeline.Workspace)/perf/perftests/html-report'
               artifact: 'jmeter-report'
 
-  # تشغيل سيلينيوم على نفس الـ self-hosted agent
   - job: SeleniumUITests
     displayName: 'Selenium UI Tests'
     pool:
@@ -392,6 +383,30 @@ stages:
       displayName: 'Terraform installation (Cleanup)'
       inputs:
         terraformVersion: '1.13.1'
+
+    # NEW: clean to ensure a fresh init
+    - task: Bash@3
+      displayName: 'Clean .terraform (Cleanup)'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+          rm -rf "$(System.DefaultWorkingDirectory)/terraform/environments/test/.terraform"
+
+    # NEW: init with the same backend settings before destroy
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+      displayName: 'Terraform init (Cleanup)'
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        backendServiceArm: '$(azureServiceConnectionId)'
+        backendAzureRmResourceGroupName: '$(resourceGroup)'
+        backendAzureRmStorageAccountName: 'tfstatebootstrap01'
+        backendAzureRmContainerName: 'tfstate'
+        backendAzureRmKey: 'test.terraform.tfstate'
+        backendAzureRmUseOidc: false
+        backendAzureRmUseMsi: false
 
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
       displayName: 'Terraform destroy'
