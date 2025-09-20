@@ -1,0 +1,51 @@
+{
+  "info": {
+    "name": "TestSuite.Regression",
+    "_postman_id": "6a9f7d80-0000-4000-9000-regr",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Ping Activities",
+      "request": { "method": "GET", "header": [], "url": "{{BASE_URL}}/api/v1/Activities" },
+      "event": [{
+        "listen": "test",
+        "script": {
+          "exec": [
+            "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+            "pm.test(\"JSON\", () => pm.response.to.be.withBody);"
+          ],
+          "type": "text/javascript"
+        }
+      }]
+    },
+    {
+      "name": "Ping Authors",
+      "request": { "method": "GET", "header": [], "url": "{{BASE_URL}}/api/v1/Authors" },
+      "event": [{
+        "listen": "test",
+        "script": {
+          "exec": [
+            "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+            "pm.test(\"JSON array\", () => Array.isArray(pm.response.json()));"
+          ],
+          "type": "text/javascript"
+        }
+      }]
+    },
+    {
+      "name": "Ping Books/1",
+      "request": { "method": "GET", "header": [], "url": "{{BASE_URL}}/api/v1/Books/1" },
+      "event": [{
+        "listen": "test",
+        "script": {
+          "exec": [
+            "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+            "pm.test(\"Has id\", () => typeof pm.response.json().id !== 'undefined');"
+          ],
+          "type": "text/javascript"
+        }
+      }]
+    }
+  ]
+}

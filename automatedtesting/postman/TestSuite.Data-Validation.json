@@ -1,0 +1,75 @@
+{
+  "info": {
+    "name": "TestSuite.Data-Validation",
+    "_postman_id": "3b2f6f3d-0000-4000-9000-datav",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Activities - list has items",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{BASE_URL}}/api/v1/Activities"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+              "pm.test(\"Content-Type is JSON\", () => pm.response.to.have.header(\"Content-Type\"));",
+              "const body = pm.response.json();",
+              "pm.test(\"Array has at least 1 item\", () => Array.isArray(body) && body.length > 0);"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Activities - item #1 has expected fields",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{BASE_URL}}/api/v1/Activities/1"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+              "const j = pm.response.json();",
+              "pm.test(\"Has id\", () => j && typeof j.id !== 'undefined');",
+              "pm.test(\"id == 1\", () => j.id === 1);",
+              "pm.test(\"Has title\", () => typeof j.title === 'string');"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Books - list not empty",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{BASE_URL}}/api/v1/Books"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+              "const arr = pm.response.json();",
+              "pm.test(\"Books array has items\", () => Array.isArray(arr) && arr.length > 0);"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    }
+  ]
+}

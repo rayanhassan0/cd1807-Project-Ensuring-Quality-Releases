@@ -1,0 +1,6 @@
+{
+  "name": "Test",
+  "values": [
+    { "key": "BASE_URL", "value": "https://fakerestapi.azurewebsites.net", "enabled": true }
+  ]
+}
