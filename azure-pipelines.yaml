@@ -358,13 +358,18 @@ stages:
           mkdir -p "$HOME/selenium"
           unzip -o "$(Pipeline.Workspace)/drop-uitests/$(Build.BuildId)-uitests.zip" -d "$HOME/selenium"
 
-          # تثبيت متصفح Chromium (إن توفر apt)
+          # تثبيت Chromium عند الحاجة
           if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get update -y
             sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium || true
           fi
 
-          # ترقية pip وتثبيت المتطلبات
+          # نضيف /snap/bin للمسار ونحدد CHROME_BIN لاستخدامه من داخل سكربت بايثون
+          export PATH="/snap/bin:$PATH"
+          export CHROME_BIN="$(command -v chromium || command -v chromium-browser || echo /snap/bin/chromium)"
+          echo "Using CHROME_BIN=$CHROME_BIN"
+
+          # ترقية pip وتثبيت المتطلبات (selenium + webdriver-manager)
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user -r "$HOME/selenium/requirements.txt"
 
