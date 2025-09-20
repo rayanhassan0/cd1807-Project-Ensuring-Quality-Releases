@@ -12,7 +12,7 @@ variables:
   projectRoot: $(System.DefaultWorkingDirectory)
   environmentName: 'test'
   resourceGroup: 'Azuredevops'
-  appServiceName: 'myapp-AppService'   # سنضيف -$(Build.BuildId) في plan/apply/destroy والنشر
+  appServiceName: 'myapp-AppService'
 
 stages:
 # =============== BUILD ===============
@@ -90,7 +90,7 @@ stages:
         backendAzureRmUseOidc: false
         backendAzureRmUseMsi: false
 
-    # ====== (مرة واحدة فقط) استيراد الموارد الحالية إلى الـ state — احذف/علّق هذه الخطوة بعد أول نجاح ======
+    # (اختياري) استيراد موارد موجودة أول مرة فقط
     - task: AzureCLI@2
       displayName: 'TF import existing resources into state (one-time)'
       inputs:
@@ -100,28 +100,13 @@ stages:
         inlineScript: |
           set -e
           cd "$(System.DefaultWorkingDirectory)/terraform/environments/test"
-
-          echo ">> Import VNet (vnet-test)"
-          terraform import -input=false \
-            'module.network.azurerm_virtual_network.vnet' \
-            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Network/virtualNetworks/vnet-test' \
-            || true
-
-          echo ">> Import Subnet (subnet-test)"
-          terraform import -input=false \
-            'module.network.azurerm_subnet.subnet_test' \
-            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Network/virtualNetworks/vnet-test/subnets/subnet-test' \
-            || true
-
-          echo ">> Import App Service Plan (myapp-plan)"
-          terraform import -input=false \
-            'module.appservice.azurerm_service_plan.plan' \
-            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Web/serverFarms/myapp-plan' \
-            || true
-
-          echo "State after import:"
+          terraform import -input=false 'module.network.azurerm_virtual_network.vnet' \
+            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Network/virtualNetworks/vnet-test' || true
+          terraform import -input=false 'module.network.azurerm_subnet.subnet_test' \
+            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Network/virtualNetworks/vnet-test/subnets/subnet-test' || true
+          terraform import -input=false 'module.appservice.azurerm_service_plan.plan' \
+            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Web/serverFarms/myapp-plan' || true
           terraform state list || true
-    # ====== نهاية خطوة الاستيراد ======
 
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
       displayName: 'Terraform validate'
@@ -170,11 +155,15 @@ stages:
       inputs:
         versionSpec: '18.x'
 
-    - task: CmdLine@2
-      displayName: 'Install Newman'
+    # نجهز مجلد ثابت لنتائج Postman
+    - task: Bash@3
+      displayName: 'Prepare Postman results folder'
       inputs:
-        script: 'npm install -g newman'
-        workingDirectory: $(System.DefaultWorkingDirectory)
+        targetType: inline
+        script: |
+          set -e
+          mkdir -p '$(Build.SourcesDirectory)/automatedtesting/postman/results'
+          rm -f   '$(Build.SourcesDirectory)/automatedtesting/postman/results/'*.xml
 
     - task: CmdLine@2
       displayName: 'Run Data Validation Tests'
@@ -184,8 +173,8 @@ stages:
           newman run TestSuite.Data-Validation.json \
                  -e Test.environment.json \
                  --reporters cli,junit \
-                 --reporter-junit-export TEST-DataValidation.xml || true
-        workingDirectory: '$(System.DefaultWorkingDirectory)/automatedtesting/postman'
+                 --reporter-junit-export "$(Build.SourcesDirectory)/automatedtesting/postman/results/TEST-DataValidation.xml" || true
+        workingDirectory: '$(Build.SourcesDirectory)/automatedtesting/postman'
 
     - task: CmdLine@2
       displayName: 'Run Regression Tests'
@@ -195,17 +184,18 @@ stages:
           newman run TestSuite.Regression.json \
                  -e Test.environment.json \
                  --reporters cli,junit \
-                 --reporter-junit-export TEST-Regression.xml || true
-        workingDirectory: '$(System.DefaultWorkingDirectory)/automatedtesting/postman'
+                 --reporter-junit-export "$(Build.SourcesDirectory)/automatedtesting/postman/results/TEST-Regression.xml" || true
+        workingDirectory: '$(Build.SourcesDirectory)/automatedtesting/postman'
 
     - task: PublishTestResults@2
       displayName: 'Publish Postman JUnit Results'
       inputs:
         testResultsFormat: 'JUnit'
-        testResultsFiles: '**/TEST-*.xml'
-        searchFolder: '$(System.DefaultWorkingDirectory)/automatedtesting/postman'
+        testResultsFiles: '*.xml'
+        searchFolder: '$(Build.SourcesDirectory)/automatedtesting/postman/results'
         mergeTestResults: true
         testRunTitle: 'Postman Results'
+        failTaskOnFailedTests: false
 
     - task: ArchiveFiles@2
       displayName: 'Archive UI Tests (Selenium)'
@@ -277,7 +267,6 @@ stages:
                 cd "$(Pipeline.Workspace)"
                 mkdir -p perf && cd perf
 
-                # Java for JMeter
                 if ! command -v java >/dev/null 2>&1; then
                   if command -v apt-get >/dev/null 2>&1; then
                     sudo apt-get update -y
@@ -313,6 +302,7 @@ stages:
                 THREADS=10
                 RAMPUP=10
 
+                echo "Starting standalone test @ $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
                 set +e
                 "$JM/bin/jmeter" -n -t "$JMX" \
                   -JAPPSERVICEURL="$APPURL" \
@@ -321,6 +311,7 @@ stages:
                   -JdurationSeconds="$DURATION" \
                   -Jthreads="$THREADS" \
                   -Jrampup="$RAMPUP" \
+                  -Jsummariser.name=summary \
                   -l perftests/results.jtl
                 JM_EXIT=$?
                 set -e
@@ -332,13 +323,9 @@ stages:
                   echo "<html><body><h2>No JMeter data written to results.jtl</h2></body></html>" > perftests/html-report/index.html
                 fi
 
-                echo "Tree under $(pwd):"
-                ls -la
-                echo "Tree under perftests:"
-                ls -la perftests || true
-                echo "Tree under perftests/html-report:"
-                ls -la perftests/html-report || true
-
+                echo "Tree under $(pwd):"; ls -la
+                echo "Tree under perftests:"; ls -la perftests || true
+                echo "Tree under perftests/html-report:"; ls -la perftests/html-report || true
                 echo "JMeter finished with exit code: $JM_EXIT"
 
           - task: PublishPipelineArtifact@1
@@ -384,7 +371,6 @@ stages:
       inputs:
         terraformVersion: '1.13.1'
 
-    # NEW: clean to ensure a fresh init
     - task: Bash@3
       displayName: 'Clean .terraform (Cleanup)'
       inputs:
@@ -393,7 +379,6 @@ stages:
           set -e
           rm -rf "$(System.DefaultWorkingDirectory)/terraform/environments/test/.terraform"
 
-    # NEW: init with the same backend settings before destroy
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
       displayName: 'Terraform init (Cleanup)'
       inputs:
