@@ -298,7 +298,7 @@ stages:
 
                 JM="$(pwd)/apache-jmeter-${JM_VER}"
 
-                # اسم الجيمكس الصحيح بناءً على هيكلة مشروعك (Starter.jmx)
+                # اسم الجيمكس الصحيح بناءً على هيكلة مشروعك (Starter.jmx أولاً ثم PerformanceTestSuite.jmx)
                 if [ -f "perftests/Starter.jmx" ]; then
                   JMX="perftests/Starter.jmx"
                 elif [ -f "perftests/PerformanceTestSuite.jmx" ]; then
@@ -307,7 +307,7 @@ stages:
                   echo "JMeter JMX not found under perftests/. Expected Starter.jmx" && ls -la perftests && exit 1
                 fi
 
-                # نستخدم اسم المضيف مباشرة من النمط القياسي لتفادي az webapp show
+                # نستخدم اسم المضيف مباشرة لتفادي انتظار az webapp show
                 APPURL="https://$(appServiceName)-$(Build.BuildId).azurewebsites.net"
                 echo "Testing against: $APPURL"
                 echo "Using JMX: $JMX"
@@ -329,16 +329,31 @@ stages:
                 JM_EXIT=$?
                 set -e
 
-                # توليد تقرير HTML حتى لو فشل الاختبار
-                "$JM/bin/jmeter" -g perftests/results.jtl -o perftests/html-report || true
+                # ضَمَن وجود مجلد التقرير دائماً
+                mkdir -p perftests/html-report
+
+                # توليد تقرير HTML إن كانت النتائج موجودة، وإلا أنشئ صفحة بديلة
+                if [ -s perftests/results.jtl ]; then
+                  "$JM/bin/jmeter" -g perftests/results.jtl -o perftests/html-report || true
+                else
+                  echo "<html><body><h2>No JMeter data written to results.jtl</h2></body></html>" > perftests/html-report/index.html
+                fi
+
+                echo "Tree under $(pwd):"
+                ls -la
+                echo "Tree under perftests:"
+                ls -la perftests || true
+                echo "Tree under perftests/html-report:"
+                ls -la perftests/html-report || true
+
                 echo "JMeter finished with exit code: $JM_EXIT"
 
-          - task: PublishBuildArtifacts@1
+          # انشر تقرير JMeter (نضمن أن المجلد موجود بأي حال)
+          - task: PublishPipelineArtifact@1
             displayName: 'Publish JMeter HTML Report'
             inputs:
-              PathtoPublish: '$(Pipeline.Workspace)/perf/perftests/html-report'
-              ArtifactName: 'jmeter-report'
-              publishLocation: 'Container'
+              targetPath: '$(Pipeline.Workspace)/perf/perftests/html-report'
+              artifact: 'jmeter-report'
 
   # تشغيل سيلينيوم على نفس الـ self-hosted agent
   - job: SeleniumUITests
