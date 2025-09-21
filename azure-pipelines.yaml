@@ -250,7 +250,7 @@ stages:
           - download: current
             artifact: drop-fakerestapi
 
-          # اضبط إعدادات التطبيق مسبقًا لتفادي تعليق Kudu/Oryx
+          # اضبط إعدادات التطبيق مسبقًا (نوقف Oryx ونستخدم Run From Package ونزيد المهلات)
           - task: AzureCLI@2
             displayName: 'Pre-set App Settings'
             inputs:
@@ -266,22 +266,36 @@ stages:
                   SCM_COMMAND_IDLE_TIMEOUT=1800 \
                   WEBSITES_CONTAINER_START_TIME_LIMIT=1800
 
-          - task: AzureWebApp@1
-            displayName: 'Deploy Azure Web App'
-            timeoutInMinutes: 20
+          # نشر سريع عبر CLI بدون التعليق الذي يحصل في AzureWebApp@1
+          - task: AzureCLI@2
+            displayName: 'Deploy via az webapp deploy (zip)'
+            timeoutInMinutes: 15
             inputs:
               azureSubscription: '$(azureServiceConnectionId)'
-              appName: '$(appServiceName)-$(Build.BuildId)'
-              appType: 'webAppLinux'   # مهم لو الخطة Linux
-              package: '$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip'
-              deploymentMethod: 'zipDeploy'
-              appSettings: |
-                WEBSITE_RUN_FROM_PACKAGE=1
-                SCM_DO_BUILD_DURING_DEPLOYMENT=false
-                SCM_COMMAND_IDLE_TIMEOUT=1800
-                WEBSITES_CONTAINER_START_TIME_LIMIT=1800
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euxo pipefail
+                APP="$(appServiceName)-$(Build.BuildId)"
+                ZIP="$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
+                # النشر
+                az webapp deploy --resource-group "$(resourceGroup)" --name "$APP" \
+                  --type zip --src-path "$ZIP" --async true
+                # انتظار جهوزية التطبيق بسرعة بدل التعليق داخل التسك
+                APPURL="https://$APP.azurewebsites.net"
+                for i in $(seq 1 30); do
+                  code=$(curl -s -o /dev/null -w "%{http_code}" -m 10 "$APPURL" || true)
+                  echo "Probe $i -> $code"
+                  if [ "$code" = "200" ] || [ "$code" = "302" ] || [ "$code" = "301" ]; then
+                    echo "App is up: $APPURL"
+                    exit 0
+                  fi
+                  sleep 5
+                done
+                echo "App did not become ready in time: $APPURL" >&2
+                exit 1
 
-          # فحص سريع بعد النشر
+          # فحص إضافي (يبقى كما هو)
           - task: Bash@3
             displayName: 'Smoke check'
             inputs:
@@ -375,7 +389,6 @@ stages:
     - download: current
       artifact: drop-uitests
 
-    # ======= ستيب Selenium المعدّل مع Swap + Retry + Fallback =======
     - task: Bash@3
       displayName: 'Run Selenium'
       inputs:
@@ -430,7 +443,6 @@ stages:
           if [ "$OK" -ne 1 ]; then
             echo "Falling back to direct .deb download..."
             TMP_DEB="/tmp/google-chrome-stable_current_amd64.deb"
-            # نحاول أكثر من مرّة مع تحقق hash بسيط (الحجم > 50MB)
             for attempt in 1 2; do
               curl -L --fail -o "$TMP_DEB" "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" && break || sleep 3
             done
@@ -439,7 +451,6 @@ stages:
               exit 1
             fi
             sudo dpkg -i "$TMP_DEB" || sudo apt-get -f install -y
-            # أعد dpkg في حال احتياجات التبعيات
             sudo dpkg -i "$TMP_DEB" || true
           fi
           set -e
@@ -470,10 +481,10 @@ stages:
           export DEMO_USER="standard_user"
           export DEMO_PASS="secret_sauce"
 
-          # 11) مجلدات مؤقتة لكروم لتجنّب DevToolsActivePort
+          # 11) مجلدات مؤقتة لكروم لتجنّب DevToolsActivePort (تصحيح القوس)
           export CHROME_TMP_BASE="$(mktemp -d)"
           export CHROME_USER_DATA_DIR="${CHROME_TMP_BASE}/user-data"
-          export CHROME_CACHE_DIR="${CHROME_TMP_BASE}/cache"}
+          export CHROME_CACHE_DIR="${CHROME_TMP_BASE}/cache"
           mkdir -p "$CHROME_USER_DATA_DIR" "$CHROME_CACHE_DIR"
           echo "Temp chrome dir: $CHROME_TMP_BASE"
 
