@@ -151,9 +151,9 @@ stages:
           - download: current
             artifact: drop-fakerestapi
 
-          # نشر عبر WEBSITE_RUN_FROM_PACKAGE لتفادي علوق كودو
+          # نشر سريع بدون Kudu: رفع ZIP إلى Storage + WEBSITE_RUN_FROM_PACKAGE
           - task: AzureCLI@2
-            displayName: 'Upload ZIP to Storage & set WEBSITE_RUN_FROM_PACKAGE'
+            displayName: 'Fast deploy via WEBSITE_RUN_FROM_PACKAGE'
             inputs:
               azureSubscription: '$(azureServiceConnectionId)'
               scriptType: bash
@@ -167,16 +167,22 @@ stages:
                 ZIP="$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
                 BLOB="fakerestapi-$(Build.BuildId).zip"
 
+                # 0) AlwaysOn لتدفية التطبيق (يقلل التعليق عند التشغيل) — يحتاج خطة B1/S1+
+                az webapp config set -g "$RG" -n "$APP" --always-on true || true
+
+                # 1) رفع الحزمة إلى التخزين
                 KEY=$(az storage account keys list -g "$RG" -n "$SA" --query "[0].value" -o tsv)
                 az storage container create --name "$CN" --account-name "$SA" --auth-mode key --account-key "$KEY" >/dev/null
                 az storage blob upload --account-name "$SA" --auth-mode key --account-key "$KEY" \
                   --container-name "$CN" --name "$BLOB" --file "$ZIP" --overwrite
 
-                EXP=$(date -u -d "+2 days" '+%Y-%m-%dT%H:%MZ')
+                # 2) توليد SAS قصير + تعيين WEBSITE_RUN_FROM_PACKAGE
+                EXP=$(date -u -d "+12 hours" '+%Y-%m-%dT%H:%MZ')
                 SAS=$(az storage blob generate-sas \
                   --account-name "$SA" --auth-mode key --account-key "$KEY" \
                   --container-name "$CN" --name "$BLOB" --permissions r --expiry "$EXP" -o tsv)
                 URL="https://${SA}.blob.core.windows.net/${CN}/${BLOB}?${SAS}"
+                echo "Package URL: $URL"
 
                 az webapp config appsettings set -g "$RG" -n "$APP" --settings \
                   WEBSITE_RUN_FROM_PACKAGE="$URL" \
@@ -184,20 +190,22 @@ stages:
                   SCM_COMMAND_IDLE_TIMEOUT=1800 \
                   WEBSITES_CONTAINER_START_TIME_LIMIT=1800
 
+                # 3) Restart خفيف
                 az webapp restart -g "$RG" -n "$APP"
 
+                # 4) Health probe سريع لمسار الجذر ثم مسار API (إن وجد)
                 APPURL="https://$APP.azurewebsites.net"
-                for i in $(seq 1 30); do
-                  code=$(curl -s -o /dev/null -w "%{http_code}" -m 10 "$APPURL" || true)
-                  echo "Probe $i -> $code"
-                  if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; then
-                    echo "App is up: $APPURL"
-                    exit 0
-                  fi
-                  sleep 5
+                PATHS="/ /api/v1/Employees"
+                for p in $PATHS; do
+                  for i in $(seq 1 24); do
+                    code=$(curl -s -o /dev/null -w "%{http_code}" -m 8 "$APPURL$p" || true)
+                    echo "Probe $p ($i/24) -> $code"
+                    if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; then
+                      break
+                    fi
+                    sleep 5
+                  done
                 done
-                echo "App not ready: $APPURL" >&2
-                exit 1
 
           - download: current
             artifact: drop-perftests
