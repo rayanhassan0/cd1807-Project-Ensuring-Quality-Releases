@@ -337,43 +337,89 @@ stages:
     - download: current
       artifact: drop-uitests
 
-    # ======= ستيب Selenium المعدّل =======
+    # ======= ستيب Selenium المعدّل مع Swap + Retry + Fallback =======
     - task: Bash@3
       displayName: 'Run Selenium'
       inputs:
         targetType: 'inline'
         script: |
           set -euxo pipefail
+
           mkdir -p "$HOME/selenium"
           unzip -o "$(Pipeline.Workspace)/drop-uitests/$(Build.BuildId)-uitests.zip" -d "$HOME/selenium"
 
-          # ازالة أي بقايا كروميوم/درايفر لتفادي التعارض
+          # 0) Swap مؤقت لتفادي OOM أثناء فك وتثبيت كروم (~400MB)
+          if ! sudo swapon --show | grep -q swapfile; then
+            sudo fallocate -l 2G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+            sudo swapon /swapfile
+          fi
+          sudo swapon --show || true
+
+          # 1) إزالة أي Chromium/Chromedriver قديم + تحديث الفهارس
           sudo apt-get update -y
           sudo apt-get purge -y chromium-browser chromium-chromedriver || true
 
-          # تثبيت متطلبات تشغيل كروم بدون واجهة
-          sudo apt-get install -y \
-            fonts-liberation libu2f-udev libvulkan1 libgbm1 libasound2 xvfb gconf-service libxi6 || true
+          # 2) متطلبات بيئة كروم headless
+          sudo apt-get install -y unzip fonts-liberation libu2f-udev libvulkan1 libgbm1 libasound2 xvfb gconf-service libxi6 || true
 
-          # تثبيت Google Chrome (stable)
-          curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-linux.gpg
-          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-linux.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          # 3) إضافة مستودع Google الرسمي إن لم يكن موجود
+          if [ ! -f /etc/apt/sources.list.d/google-chrome.list ]; then
+            curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-linux.gpg
+            echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-linux.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          fi
+
+          # 4) تنظيف الكاش وإعادة تحديث لضمان حزمة سليمة
+          sudo apt-get clean
+          sudo rm -rf /var/cache/apt/archives/partial || true
+          sudo mkdir -p /var/cache/apt/archives/partial
           sudo apt-get update -y
-          sudo apt-get install -y google-chrome-stable
 
-          # تأكيد النسخ
-          /usr/bin/google-chrome --version || true
+          # 5) تثبيت Google Chrome بمحاولات + Fallback يدوي عبر .deb
+          set +e
+          OK=0
+          for attempt in 1 2 3; do
+            echo "Installing google-chrome-stable (attempt $attempt)..."
+            sudo apt-get install -y --no-install-recommends google-chrome-stable && OK=1 && break
+            echo "apt install failed; cleaning cache and retrying..."
+            sudo apt-get clean
+            sudo rm -f /var/cache/apt/archives/google-chrome-stable_* || true
+            sudo apt-get update -y
+            sleep 3
+          done
 
-          # بيئة تشغيل كروم بالوضع الرأس-غيري
+          if [ "$OK" -ne 1 ]; then
+            echo "Falling back to direct .deb download..."
+            TMP_DEB="/tmp/google-chrome-stable_current_amd64.deb"
+            # نحاول أكثر من مرّة مع تحقق hash بسيط (الحجم > 50MB)
+            for attempt in 1 2; do
+              curl -L --fail -o "$TMP_DEB" "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" && break || sleep 3
+            done
+            if [ ! -s "$TMP_DEB" ]; then
+              echo "Failed to download Chrome .deb" >&2
+              exit 1
+            fi
+            sudo dpkg -i "$TMP_DEB" || sudo apt-get -f install -y
+            # أعد dpkg في حال احتياجات التبعيات
+            sudo dpkg -i "$TMP_DEB" || true
+          fi
+          set -e
+
+          # 6) تأكيد وجود كروم
+          /usr/bin/google-chrome --version
+
+          # 7) تهيئة بيئة التشغيل لسيلينيوم + webdriver-manager
           export CHROME_BIN="/usr/bin/google-chrome"
-          # نفرّغ أي قيمة لـ CHROMEDRIVER حتى يختار webdriver-manager السليم
           unset CHROMEDRIVER || true
+          export WDM_LOG_LEVEL=0
+          export WDM_LOCAL=1
 
-          # ترقية pip وتثبيت المتطلبات
+          # 8) تثبيت باكدجات بايثون
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user -r "$HOME/selenium/requirements.txt"
 
-          # طباعة باكدجات مهمة للتشخيص
+          # 9) طباعة نسخ مهمة للتشخيص
           python3 - <<'PY'
           import selenium, sys
           import webdriver_manager
@@ -381,21 +427,20 @@ stages:
           print("webdriver-manager:", webdriver_manager.__version__)
           PY
 
-          # متغيرات اختبار saucedemo الافتراضية
+          # 10) متغيرات saucedemo الافتراضية
           export DEMO_URL="https://www.saucedemo.com/"
           export DEMO_USER="standard_user"
           export DEMO_PASS="secret_sauce"
 
-          # إنشاء مجلدات عمل كروم المؤقتة (لتفادي DevToolsActivePort)
+          # 11) مجلدات مؤقتة لكروم لتجنّب DevToolsActivePort
           export CHROME_TMP_BASE="$(mktemp -d)"
           export CHROME_USER_DATA_DIR="${CHROME_TMP_BASE}/user-data"
           export CHROME_CACHE_DIR="${CHROME_TMP_BASE}/cache"
           mkdir -p "$CHROME_USER_DATA_DIR" "$CHROME_CACHE_DIR"
           echo "Temp chrome dir: $CHROME_TMP_BASE"
 
-          # تنفيذ الاختبار مع مهلة حماية
+          # 12) تشغيل الاختبار مع مهلة حماية
           timeout 4m python3 "$HOME/selenium/login.py"
-
           echo "Selenium finished."
 
 # =============== CLEANUP ===============
