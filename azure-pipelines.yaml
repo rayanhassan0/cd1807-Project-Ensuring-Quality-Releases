@@ -346,29 +346,22 @@ stages:
           mkdir -p "$HOME/selenium"
           unzip -o "$(Pipeline.Workspace)/drop-uitests/$(Build.BuildId)-uitests.zip" -d "$HOME/selenium"
 
-          # إزالة أي chromedriver قديم من apt لتفادي التعارض (الذي سبب رسالة: Service /usr/bin/chromedriver exited)
-          if dpkg -s chromium-chromedriver >/dev/null 2>&1; then
-            echo "Purging apt chromium-chromedriver to avoid version mismatch..."
+          # أزل أي chromedriver من apt لتجنّب تعارض النسخ
+          if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get purge -y chromium-chromedriver || true
+            # لو فيه snap مثبّت، أزله (كان يسبب exit code 1 داخل خدمة الـagent)
+            sudo snap remove chromium || true
+            sudo apt-get update -y
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y chromium-browser
+            sudo apt-get clean
           fi
 
-          # تأكد من وجود Chromium (snap) واستخدم chromedriver الموافق له من snap
-          export PATH="/snap/bin:$PATH"
-          export CHROME_BIN="$(command -v chromium || command -v chromium-browser || echo /snap/bin/chromium)"
-          export CHROMEDRIVER="$(command -v chromium.chromedriver || true)"
+          # استخدم متصفح Chromium من apt
+          export CHROME_BIN="/usr/bin/chromium-browser"
+          # لا نفرض CHROMEDRIVER — نخلي webdriver-manager يجيب المتوافق
+          unset CHROMEDRIVER
+          export PATH="$HOME/.local/bin:$PATH"
 
-          echo "Using CHROME_BIN=${CHROME_BIN}"
-          echo "Using CHROMEDRIVER=${CHROMEDRIVER}"
-
-          # شغّل الـwrapper مرة ليجهّز الدرايفر المطابق
-          if [ -n "$CHROMEDRIVER" ]; then
-            "$CHROMEDRIVER" --version || true
-          else
-            echo "chromium.chromedriver not found in /snap/bin !" >&2
-            exit 1
-          fi
-
-          # ترقية pip وتثبيت المتطلبات
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user -r "$HOME/selenium/requirements.txt"
 
