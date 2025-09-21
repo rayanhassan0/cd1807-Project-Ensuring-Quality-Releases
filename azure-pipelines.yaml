@@ -7,7 +7,7 @@ pool:
   name: myAgentPool
 
 variables:
-  python.version: '3.10'
+  python.version: '3.7.6'
   azureServiceConnectionId: 'udacity-az-sp'
   projectRoot: $(System.DefaultWorkingDirectory)
   environmentName: 'test'
@@ -15,18 +15,66 @@ variables:
   appServiceName: 'myapp-AppService'
 
 stages:
-# ========================= BUILD =========================
+# =============== BUILD ===============
 - stage: Build
-  displayName: Build
   jobs:
-  - job: BuildAndPackage
+  - job: BuildInfrastructure
     displayName: 'Terraform + Postman + Package'
     steps:
-    # Terraform
+    - task: AzureCLI@2
+      displayName: 'Show Azure account'
+      inputs:
+        azureSubscription: '$(azureServiceConnectionId)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: az account show
+
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
-      displayName: 'Terraform install'
+      displayName: 'Terraform installation'
       inputs:
         terraformVersion: '1.13.1'
+
+    - task: Bash@3
+      displayName: 'Clean .terraform (ensure re-init)'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+          rm -rf "$(System.DefaultWorkingDirectory)/terraform/environments/test/.terraform"
+
+    - task: Bash@3
+      displayName: 'Debug: list terraform folder and modules'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+          echo "---- env test ----"
+          ls -la "$(System.DefaultWorkingDirectory)/terraform/environments/test"
+          echo "---- modules/appservice ----"
+          ls -la "$(System.DefaultWorkingDirectory)/terraform/modules/appservice" || true
+          echo "---- modules/network ----"
+          ls -la "$(System.DefaultWorkingDirectory)/terraform/modules/network" || true
+          echo "---- terraform.tfvars ----"
+          sed -n '1,200p' "$(System.DefaultWorkingDirectory)/terraform/environments/test/terraform.tfvars"
+
+    - task: AzureCLI@2
+      displayName: 'Ensure backend storage exists'
+      inputs:
+        azureSubscription: '$(azureServiceConnectionId)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -e
+          RG="$(resourceGroup)"
+          LOC="westus3"
+          SA="tfstatebootstrap01"
+          echo "Ensure SA=$SA RG=$RG LOC=$LOC"
+          if ! az storage account show -g "$RG" -n "$SA" >/dev/null 2>&1; then
+            az storage account create -g "$RG" -n "$SA" -l "$LOC" --sku Standard_LRS
+          fi
+          KEY=$(az storage account keys list -g "$RG" -n "$SA" --query "[0].value" -o tsv)
+          az storage container create --name tfstate --account-name "$SA" --auth-mode key --account-key "$KEY" >/dev/null
+          echo "Backend ready."
 
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
       displayName: 'Terraform init'
@@ -42,15 +90,65 @@ stages:
         backendAzureRmUseOidc: false
         backendAzureRmUseMsi: false
 
+    - task: AzureCLI@2
+      displayName: 'TF import existing resources into state (one-time)'
+      inputs:
+        azureSubscription: '$(azureServiceConnectionId)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -e
+          cd "$(System.DefaultWorkingDirectory)/terraform/environments/test"
+          terraform import -input=false 'module.network.azurerm_virtual_network.vnet' \
+            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Network/virtualNetworks/vnet-test' || true
+          terraform import -input=false 'module.network.azurerm_subnet.subnet_test' \
+            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Network/virtualNetworks/vnet-test/subnets/subnet-test' || true
+          terraform import -input=false 'module.appservice.azurerm_service_plan.plan' \
+            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Web/serverFarms/myapp-plan' || true
+          terraform state list || true
+
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+      displayName: 'Terraform validate'
+      inputs:
+        provider: 'azurerm'
+        command: 'validate'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
+
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+      displayName: 'Terraform plan'
+      inputs:
+        provider: 'azurerm'
+        command: 'plan'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        commandOptions: '-out=tfplan -var="app_service_name=$(appServiceName)-$(Build.BuildId)"'
+        environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
+
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
       displayName: 'Terraform apply'
       inputs:
         provider: 'azurerm'
         command: 'apply'
         workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        commandOptions: '-auto-approve -var="app_service_name=$(appServiceName)-$(Build.BuildId)"'
         environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
 
-    # Postman (Newman)
+    - task: Bash@3
+      displayName: 'Install CLI deps (zip, unzip, pip)'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y zip unzip python3-pip
+          elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y zip unzip python3-pip
+          else
+            echo "Unknown package manager; please install zip/unzip manually" >&2
+            exit 1
+          fi
+
     - task: NodeTool@0
       displayName: 'Use Node.js 18.x'
       inputs:
@@ -63,7 +161,7 @@ stages:
         workingDirectory: $(System.DefaultWorkingDirectory)
 
     - task: Bash@3
-      displayName: 'Prepare Postman result folder'
+      displayName: 'Prepare Postman results folder'
       inputs:
         targetType: inline
         script: |
@@ -94,7 +192,7 @@ stages:
         workingDirectory: '$(Build.SourcesDirectory)/automatedtesting/postman'
 
     - task: PublishTestResults@2
-      displayName: 'Publish Postman Results'
+      displayName: 'Publish Postman JUnit Results'
       inputs:
         testResultsFormat: 'JUnit'
         testResultsFiles: '*.xml'
@@ -103,7 +201,6 @@ stages:
         testRunTitle: 'Postman Results'
         failTaskOnFailedTests: false
 
-    # أرشفة ونشر الحزم
     - task: ArchiveFiles@2
       displayName: 'Archive UI Tests (Selenium)'
       inputs:
@@ -112,6 +209,7 @@ stages:
         archiveType: 'zip'
         archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-uitests.zip'
     - publish: $(Build.ArtifactStagingDirectory)/$(Build.BuildId)-uitests.zip
+      displayName: 'Publish UI Tests Artifact'
       artifact: drop-uitests
 
     - task: ArchiveFiles@2
@@ -122,6 +220,7 @@ stages:
         archiveType: 'zip'
         archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-fakerestapi.zip'
     - publish: $(Build.ArtifactStagingDirectory)/$(Build.BuildId)-fakerestapi.zip
+      displayName: 'Publish FakeRestAPI Artifact'
       artifact: drop-fakerestapi
 
     - task: ArchiveFiles@2
@@ -132,15 +231,15 @@ stages:
         archiveType: 'zip'
         archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-perftests.zip'
     - publish: $(Build.ArtifactStagingDirectory)/$(Build.BuildId)-perftests.zip
+      displayName: 'Publish Perf Tests Artifact'
       artifact: drop-perftests
 
-# ========================= DEPLOY =========================
+# =============== DEPLOY ===============
 - stage: Deploy
-  displayName: Deploy
   dependsOn: Build
   jobs:
   - deployment: FakeRestAPI
-    displayName: 'Deploy WebApp + Run JMeter'
+    displayName: 'Deploy App & Run JMeter'
     pool:
       name: myAgentPool
     environment: $(environmentName)
@@ -151,61 +250,13 @@ stages:
           - download: current
             artifact: drop-fakerestapi
 
-          # نشر سريع بدون Kudu: رفع ZIP إلى Storage + WEBSITE_RUN_FROM_PACKAGE
-          - task: AzureCLI@2
-            displayName: 'Fast deploy via WEBSITE_RUN_FROM_PACKAGE'
+          - task: AzureWebApp@1
+            displayName: 'Deploy Azure Web App'
             inputs:
               azureSubscription: '$(azureServiceConnectionId)'
-              scriptType: bash
-              scriptLocation: inlineScript
-              inlineScript: |
-                set -euxo pipefail
-                RG="$(resourceGroup)"
-                APP="$(appServiceName)-$(Build.BuildId)"
-                SA="tfstatebootstrap01"
-                CN="deploypkgs"
-                ZIP="$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
-                BLOB="fakerestapi-$(Build.BuildId).zip"
-
-                # 0) AlwaysOn لتدفية التطبيق (يقلل التعليق عند التشغيل) — يحتاج خطة B1/S1+
-                az webapp config set -g "$RG" -n "$APP" --always-on true || true
-
-                # 1) رفع الحزمة إلى التخزين
-                KEY=$(az storage account keys list -g "$RG" -n "$SA" --query "[0].value" -o tsv)
-                az storage container create --name "$CN" --account-name "$SA" --auth-mode key --account-key "$KEY" >/dev/null
-                az storage blob upload --account-name "$SA" --auth-mode key --account-key "$KEY" \
-                  --container-name "$CN" --name "$BLOB" --file "$ZIP" --overwrite
-
-                # 2) توليد SAS قصير + تعيين WEBSITE_RUN_FROM_PACKAGE
-                EXP=$(date -u -d "+12 hours" '+%Y-%m-%dT%H:%MZ')
-                SAS=$(az storage blob generate-sas \
-                  --account-name "$SA" --auth-mode key --account-key "$KEY" \
-                  --container-name "$CN" --name "$BLOB" --permissions r --expiry "$EXP" -o tsv)
-                URL="https://${SA}.blob.core.windows.net/${CN}/${BLOB}?${SAS}"
-                echo "Package URL: $URL"
-
-                az webapp config appsettings set -g "$RG" -n "$APP" --settings \
-                  WEBSITE_RUN_FROM_PACKAGE="$URL" \
-                  SCM_DO_BUILD_DURING_DEPLOYMENT=false \
-                  SCM_COMMAND_IDLE_TIMEOUT=1800 \
-                  WEBSITES_CONTAINER_START_TIME_LIMIT=1800
-
-                # 3) Restart خفيف
-                az webapp restart -g "$RG" -n "$APP"
-
-                # 4) Health probe سريع لمسار الجذر ثم مسار API (إن وجد)
-                APPURL="https://$APP.azurewebsites.net"
-                PATHS="/ /api/v1/Employees"
-                for p in $PATHS; do
-                  for i in $(seq 1 24); do
-                    code=$(curl -s -o /dev/null -w "%{http_code}" -m 8 "$APPURL$p" || true)
-                    echo "Probe $p ($i/24) -> $code"
-                    if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; then
-                      break
-                    fi
-                    sleep 5
-                  done
-                done
+              appName: '$(appServiceName)-$(Build.BuildId)'
+              appType: 'webApp'
+              package: '$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip'
 
           - download: current
             artifact: drop-perftests
@@ -220,23 +271,43 @@ stages:
                 cd "$(Pipeline.Workspace)"
                 mkdir -p perf && cd perf
                 if ! command -v java >/dev/null 2>&1; then
-                  sudo apt-get update -y
-                  sudo apt-get install -y openjdk-11-jre-headless
+                  if command -v apt-get >/dev/null 2>&1; then
+                    sudo apt-get update -y
+                    sudo apt-get install -y openjdk-11-jre-headless
+                  elif command -v yum >/dev/null 2>&1; then
+                    sudo yum install -y java-11-openjdk
+                  fi
                 fi
                 JM_VER=5.6.3
-                curl -L --fail -o apache-jmeter.tgz "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JM_VER}.tgz"
+                for i in 1 2 3 4 5; do
+                  echo "Downloading JMeter attempt $i..."
+                  curl -L --fail -o apache-jmeter.tgz "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JM_VER}.tgz" && break || sleep 5
+                done
                 tar -xzf apache-jmeter.tgz
                 unzip -o "$(Pipeline.Workspace)/drop-perftests/$(Build.BuildId)-perftests.zip" -d perftests
                 JM="$(pwd)/apache-jmeter-${JM_VER}"
-                JMX="perftests/Starter.jmx"
-                [ -f "$JMX" ] || JMX="perftests/PerformanceTestSuite.jmx"
-                [ -f "$JMX" ] || { echo "No JMX file under perftests/"; ls -la perftests; exit 1; }
+                if [ -f "perftests/Starter.jmx" ]; then
+                  JMX="perftests/Starter.jmx"
+                elif [ -f "perftests/PerformanceTestSuite.jmx" ]; then
+                  JMX="perftests/PerformanceTestSuite.jmx"
+                else
+                  echo "JMeter JMX not found under perftests/. Expected Starter.jmx" && ls -la perftests && exit 1
+                fi
                 APPURL="https://$(appServiceName)-$(Build.BuildId).azurewebsites.net"
+                echo "Testing against: $APPURL"
+                echo "Using JMX: $JMX"
+                DURATION=120
+                THREADS=10
+                RAMPUP=10
+                echo "Starting standalone test @ $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
                 set +e
                 "$JM/bin/jmeter" -n -t "$JMX" \
                   -JAPPSERVICEURL="$APPURL" \
                   -JAPP_URL="$APPURL" \
                   -JBASE_URL="$APPURL" \
+                  -JdurationSeconds="$DURATION" \
+                  -Jthreads="$THREADS" \
+                  -Jrampup="$RAMPUP" \
                   -Jsummariser.name=summary \
                   -l perftests/results.jtl
                 JM_EXIT=$?
@@ -245,9 +316,12 @@ stages:
                 if [ -s perftests/results.jtl ]; then
                   "$JM/bin/jmeter" -g perftests/results.jtl -o perftests/html-report || true
                 else
-                  echo "<html><body><h2>No results</h2></body></html>" > perftests/html-report/index.html
+                  echo "<html><body><h2>No JMeter data written to results.jtl</h2></body></html>" > perftests/html-report/index.html
                 fi
-                echo "JMeter exit: $JM_EXIT"
+                echo "Tree under $(pwd):"; ls -la
+                echo "Tree under perftests:"; ls -la perftests || true
+                echo "Tree under perftests/html-report:"; ls -la perftests/html-report || true
+                echo "JMeter finished with exit code: $JM_EXIT"
 
           - task: PublishPipelineArtifact@1
             displayName: 'Publish JMeter HTML Report'
@@ -264,57 +338,100 @@ stages:
       artifact: drop-uitests
 
     - task: Bash@3
-      displayName: 'Run Selenium (Chrome + webdriver-manager)'
-      timeoutInMinutes: 12
+      displayName: 'Run Selenium'
+      timeoutInMinutes: 10
       inputs:
-        targetType: inline
+        targetType: 'inline'
         script: |
-          set -euxo pipefail
+          set -e
           mkdir -p "$HOME/selenium"
           unzip -o "$(Pipeline.Workspace)/drop-uitests/$(Build.BuildId)-uitests.zip" -d "$HOME/selenium"
 
-          # Swap مؤقت لمنع OOM أثناء تثبيت كروم
-          if ! sudo swapon --show | grep -q swapfile; then
-            sudo fallocate -l 2G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
-            sudo chmod 600 /swapfile
-            sudo mkswap /swapfile
-            sudo swapon /swapfile
-          fi
-
-          # إزالة أي Chromium قديم + متطلبات
+          echo "Removing any apt Chromium to avoid v85..."
           sudo apt-get update -y
           sudo apt-get purge -y chromium-browser chromium-chromedriver || true
-          sudo apt-get install -y fonts-liberation libu2f-udev libvulkan1 libgbm1 libasound2 xvfb gconf-service libxi6 || true
 
-          # مستودع Google + تثبيت Chrome (مع إعادة محاولة)
-          if [ ! -f /etc/apt/sources.list.d/google-chrome.list ]; then
-            curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-linux.gpg
-            echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-linux.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          echo "Ensure snap chromium is installed..."
+          if ! command -v /snap/bin/chromium >/dev/null 2>&1; then
+            sudo snap install chromium --channel=latest/stable
           fi
-          sudo apt-get clean
-          sudo apt-get update -y
-          for i in 1 2 3; do
-            sudo apt-get install -y --no-install-recommends google-chrome-stable && break || sleep 3
-          done
-          /usr/bin/google-chrome --version || true
 
-          # بايثون ومتطلبات
+          # انتظر ظهور chromedriver الخاص بالـsnap
+          for i in 1 2 3 4 5; do
+            if [ -x /snap/bin/chromium.chromedriver ]; then break; fi
+            echo "Waiting for /snap/bin/chromium.chromedriver (attempt $i) ..."
+            sleep 3
+          done
+
+          export PATH="/snap/bin:$PATH"
+          export CHROME_BIN="/snap/bin/chromium"
+          export CHROMEDRIVER="/snap/bin/chromium.chromedriver"
+
+          echo "Using CHROME_BIN=${CHROME_BIN}"
+          echo "Using CHROMEDRIVER=${CHROMEDRIVER}"
+          "$CHROME_BIN" --version || true
+          "$CHROMEDRIVER" --version || true
+
+          # تقليل مشاكل الذاكرة
+          ulimit -n 4096 || true
+
+          # تحديث pip وتثبيت المتطلبات
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user -r "$HOME/selenium/requirements.txt"
 
-          # webdriver-manager يجيب السليم تلقائياً
-          export CHROME_BIN="/usr/bin/google-chrome"
-          unset CHROMEDRIVER || true
           export DEMO_URL="https://www.saucedemo.com/"
           export DEMO_USER="standard_user"
           export DEMO_PASS="secret_sauce"
 
-          # مجلدات مؤقتة لكروم
-          export CHROME_TMP_BASE="$(mktemp -d)"
-          export CHROME_USER_DATA_DIR="${CHROME_TMP_BASE}/user-data"
-          export CHROME_CACHE_DIR="${CHROME_TMP_BASE}/cache"
-          mkdir -p "$CHROME_USER_DATA_DIR" "$CHROME_CACHE_DIR"
-
+          mkdir -p "$HOME/selenium/logs"
           echo "=== Starting Selenium with timeout (4m) ==="
-          timeout 4m python3 "$HOME/selenium/login.py"
+          timeout --preserve-status 4m \
+            python3 "$HOME/selenium/login.py" 2>&1 | tee "$HOME/selenium/logs/selenium.out"
+
           echo "Selenium finished."
+
+# =============== CLEANUP ===============
+- stage: Cleanup
+  displayName: 'Terraform Destroy'
+  dependsOn: Deploy
+  condition: always()
+  jobs:
+  - job: Destroy
+    pool:
+      name: myAgentPool
+    steps:
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
+      displayName: 'Terraform installation (Cleanup)'
+      inputs:
+        terraformVersion: '1.13.1'
+
+    - task: Bash@3
+      displayName: 'Clean .terraform (Cleanup)'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+          rm -rf "$(System.DefaultWorkingDirectory)/terraform/environments/test/.terraform"
+
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+      displayName: 'Terraform init (Cleanup)'
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        backendServiceArm: '$(azureServiceConnectionId)'
+        backendAzureRmResourceGroupName: '$(resourceGroup)'
+        backendAzureRmStorageAccountName: 'tfstatebootstrap01'
+        backendAzureRmContainerName: 'tfstate'
+        backendAzureRmKey: 'test.terraform.tfstate'
+        backendAzureRmUseOidc: false
+        backendAzureRmUseMsi: false
+
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+      displayName: 'Terraform destroy'
+      inputs:
+        provider: 'azurerm'
+        command: 'destroy'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        commandOptions: '-auto-approve -var="app_service_name=$(appServiceName)-$(Build.BuildId)"'
+        environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
