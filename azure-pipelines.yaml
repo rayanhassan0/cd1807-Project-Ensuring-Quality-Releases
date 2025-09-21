@@ -7,7 +7,7 @@ pool:
   name: myAgentPool
 
 variables:
-  python.version: '3.7.6'
+  python.version: '3.10'
   azureServiceConnectionId: 'udacity-az-sp'
   projectRoot: $(System.DefaultWorkingDirectory)
   environmentName: 'test'
@@ -339,56 +339,47 @@ stages:
 
     - task: Bash@3
       displayName: 'Run Selenium'
-      timeoutInMinutes: 10
       inputs:
         targetType: 'inline'
         script: |
-          set -e
+          set -euo pipefail
+
+          # إزالة أي Chromium سناب وأي chromedriver قديم
+          sudo snap remove chromium || true
+          if dpkg -s chromium-browser >/dev/null 2>&1; then
+            sudo apt-get -y purge chromium-browser || true
+          fi
+          sudo apt-get update -y
+
+          # تثبيت Google Chrome الرسمي (يعمل أفضل على الإيچنتس)
+          if ! command -v google-chrome >/dev/null 2>&1; then
+            wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+            sudo apt-get install -y ./google-chrome-stable_current_amd64.deb || sudo apt-get -f install -y
+          fi
+
+          echo "Chrome version: $(google-chrome --version)"
+          python3 -V
+
+          # حضّر مجلد السيلينيوم وشغّل التست
           mkdir -p "$HOME/selenium"
           unzip -o "$(Pipeline.Workspace)/drop-uitests/$(Build.BuildId)-uitests.zip" -d "$HOME/selenium"
 
-          echo "Removing any apt Chromium to avoid v85..."
-          sudo apt-get update -y
-          sudo apt-get purge -y chromium-browser chromium-chromedriver || true
-
-          echo "Ensure snap chromium is installed..."
-          if ! command -v /snap/bin/chromium >/dev/null 2>&1; then
-            sudo snap install chromium --channel=latest/stable
-          fi
-
-          # انتظر ظهور chromedriver الخاص بالـsnap
-          for i in 1 2 3 4 5; do
-            if [ -x /snap/bin/chromium.chromedriver ]; then break; fi
-            echo "Waiting for /snap/bin/chromium.chromedriver (attempt $i) ..."
-            sleep 3
-          done
-
-          export PATH="/snap/bin:$PATH"
-          export CHROME_BIN="/snap/bin/chromium"
-          export CHROMEDRIVER="/snap/bin/chromium.chromedriver"
-
-          echo "Using CHROME_BIN=${CHROME_BIN}"
-          echo "Using CHROMEDRIVER=${CHROMEDRIVER}"
-          "$CHROME_BIN" --version || true
-          "$CHROMEDRIVER" --version || true
-
-          # تقليل مشاكل الذاكرة
-          ulimit -n 4096 || true
-
-          # تحديث pip وتثبيت المتطلبات
+          # بايثون باكچز
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user -r "$HOME/selenium/requirements.txt"
+
+          export CHROME_BIN="/usr/bin/google-chrome"
+          # لا نحدد CHROMEDRIVER عشان Selenium Manager يجيب المطابق تلقائيًا
+          unset CHROMEDRIVER || true
 
           export DEMO_URL="https://www.saucedemo.com/"
           export DEMO_USER="standard_user"
           export DEMO_PASS="secret_sauce"
 
-          mkdir -p "$HOME/selenium/logs"
           echo "=== Starting Selenium with timeout (4m) ==="
-          timeout --preserve-status 4m \
-            python3 "$HOME/selenium/login.py" 2>&1 | tee "$HOME/selenium/logs/selenium.out"
-
+          timeout 4m python3 "$HOME/selenium/login.py"
           echo "Selenium finished."
+          # إن فشل timeout أو السكربت يرجّع 1، الخطوة بتفشل تلقائيًا
 
 # =============== CLEANUP ===============
 - stage: Cleanup
