@@ -339,6 +339,7 @@ stages:
 
     - task: Bash@3
       displayName: 'Run Selenium'
+      timeoutInMinutes: 10
       inputs:
         targetType: 'inline'
         script: |
@@ -346,22 +347,35 @@ stages:
           mkdir -p "$HOME/selenium"
           unzip -o "$(Pipeline.Workspace)/drop-uitests/$(Build.BuildId)-uitests.zip" -d "$HOME/selenium"
 
-          # أزل أي chromedriver من apt لتجنّب تعارض النسخ
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get purge -y chromium-chromedriver || true
-            # لو فيه snap مثبّت، أزله (كان يسبب exit code 1 داخل خدمة الـagent)
-            sudo snap remove chromium || true
-            sudo apt-get update -y
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y chromium-browser
-            sudo apt-get clean
+          echo "Removing any apt Chromium to avoid v85..."
+          sudo apt-get update -y
+          sudo apt-get purge -y chromium-browser chromium-chromedriver || true
+
+          echo "Ensure snap chromium is installed..."
+          if ! command -v /snap/bin/chromium >/dev/null 2>&1; then
+            sudo snap install chromium --channel=latest/stable
           fi
 
-          # استخدم متصفح Chromium من apt
-          export CHROME_BIN="/usr/bin/chromium-browser"
-          # لا نفرض CHROMEDRIVER — نخلي webdriver-manager يجيب المتوافق
-          unset CHROMEDRIVER
-          export PATH="$HOME/.local/bin:$PATH"
+          # انتظر ظهور chromedriver الخاص بالـsnap
+          for i in 1 2 3 4 5; do
+            if [ -x /snap/bin/chromium.chromedriver ]; then break; fi
+            echo "Waiting for /snap/bin/chromium.chromedriver (attempt $i) ..."
+            sleep 3
+          done
 
+          export PATH="/snap/bin:$PATH"
+          export CHROME_BIN="/snap/bin/chromium"
+          export CHROMEDRIVER="/snap/bin/chromium.chromedriver"
+
+          echo "Using CHROME_BIN=${CHROME_BIN}"
+          echo "Using CHROMEDRIVER=${CHROMEDRIVER}"
+          "$CHROME_BIN" --version || true
+          "$CHROMEDRIVER" --version || true
+
+          # تقليل مشاكل الذاكرة
+          ulimit -n 4096 || true
+
+          # تحديث pip وتثبيت المتطلبات
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user -r "$HOME/selenium/requirements.txt"
 
@@ -369,7 +383,11 @@ stages:
           export DEMO_USER="standard_user"
           export DEMO_PASS="secret_sauce"
 
-          python3 "$HOME/selenium/login.py"
+          mkdir -p "$HOME/selenium/logs"
+          echo "=== Starting Selenium with timeout (4m) ==="
+          timeout --preserve-status 4m \
+            python3 "$HOME/selenium/login.py" 2>&1 | tee "$HOME/selenium/logs/selenium.out"
+
           echo "Selenium finished."
 
 # =============== CLEANUP ===============
