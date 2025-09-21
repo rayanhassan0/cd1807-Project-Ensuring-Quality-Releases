@@ -270,7 +270,6 @@ stages:
                 set -e
                 cd "$(Pipeline.Workspace)"
                 mkdir -p perf && cd perf
-
                 if ! command -v java >/dev/null 2>&1; then
                   if command -v apt-get >/dev/null 2>&1; then
                     sudo apt-get update -y
@@ -279,7 +278,6 @@ stages:
                     sudo yum install -y java-11-openjdk
                   fi
                 fi
-
                 JM_VER=5.6.3
                 for i in 1 2 3 4 5; do
                   echo "Downloading JMeter attempt $i..."
@@ -287,9 +285,7 @@ stages:
                 done
                 tar -xzf apache-jmeter.tgz
                 unzip -o "$(Pipeline.Workspace)/drop-perftests/$(Build.BuildId)-perftests.zip" -d perftests
-
                 JM="$(pwd)/apache-jmeter-${JM_VER}"
-
                 if [ -f "perftests/Starter.jmx" ]; then
                   JMX="perftests/Starter.jmx"
                 elif [ -f "perftests/PerformanceTestSuite.jmx" ]; then
@@ -297,15 +293,12 @@ stages:
                 else
                   echo "JMeter JMX not found under perftests/. Expected Starter.jmx" && ls -la perftests && exit 1
                 fi
-
                 APPURL="https://$(appServiceName)-$(Build.BuildId).azurewebsites.net"
                 echo "Testing against: $APPURL"
                 echo "Using JMX: $JMX"
-
                 DURATION=120
                 THREADS=10
                 RAMPUP=10
-
                 echo "Starting standalone test @ $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
                 set +e
                 "$JM/bin/jmeter" -n -t "$JMX" \
@@ -319,14 +312,12 @@ stages:
                   -l perftests/results.jtl
                 JM_EXIT=$?
                 set -e
-
                 mkdir -p perftests/html-report
                 if [ -s perftests/results.jtl ]; then
                   "$JM/bin/jmeter" -g perftests/results.jtl -o perftests/html-report || true
                 else
                   echo "<html><body><h2>No JMeter data written to results.jtl</h2></body></html>" > perftests/html-report/index.html
                 fi
-
                 echo "Tree under $(pwd):"; ls -la
                 echo "Tree under perftests:"; ls -la perftests || true
                 echo "Tree under perftests/html-report:"; ls -la perftests/html-report || true
@@ -355,18 +346,27 @@ stages:
           mkdir -p "$HOME/selenium"
           unzip -o "$(Pipeline.Workspace)/drop-uitests/$(Build.BuildId)-uitests.zip" -d "$HOME/selenium"
 
-          # تثبيت Chromium + chromedriver (أخف بكثير من Google Chrome)
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y chromium-browser chromium-chromedriver || sudo apt-get install -y chromium chromium-driver
+          # إزالة أي chromedriver قديم من apt لتفادي التعارض (الذي سبب رسالة: Service /usr/bin/chromedriver exited)
+          if dpkg -s chromium-chromedriver >/dev/null 2>&1; then
+            echo "Purging apt chromium-chromedriver to avoid version mismatch..."
+            sudo apt-get purge -y chromium-chromedriver || true
           fi
 
-          # تعريف المسارات للمتصفح والسائق
-          export PATH="/usr/lib/chromium:/snap/bin:$PATH"
-          export CHROME_BIN="$(command -v chromium || command -v chromium-browser)"
-          export CHROMEDRIVER="$(command -v chromedriver || command -v chromium-chromedriver || echo /usr/lib/chromium/chromedriver)"
-          echo "Using CHROME_BIN=$CHROME_BIN"
-          echo "Using CHROMEDRIVER=$CHROMEDRIVER"
+          # تأكد من وجود Chromium (snap) واستخدم chromedriver الموافق له من snap
+          export PATH="/snap/bin:$PATH"
+          export CHROME_BIN="$(command -v chromium || command -v chromium-browser || echo /snap/bin/chromium)"
+          export CHROMEDRIVER="$(command -v chromium.chromedriver || true)"
+
+          echo "Using CHROME_BIN=${CHROME_BIN}"
+          echo "Using CHROMEDRIVER=${CHROMEDRIVER}"
+
+          # شغّل الـwrapper مرة ليجهّز الدرايفر المطابق
+          if [ -n "$CHROMEDRIVER" ]; then
+            "$CHROMEDRIVER" --version || true
+          else
+            echo "chromium.chromedriver not found in /snap/bin !" >&2
+            exit 1
+          fi
 
           # ترقية pip وتثبيت المتطلبات
           python3 -m pip install --user --upgrade pip
