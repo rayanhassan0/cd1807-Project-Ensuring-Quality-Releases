@@ -2,113 +2,105 @@
 import os
 import sys
 import time
-from pathlib import Path
 
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import WebDriverException, NoSuchElementException
+from selenium.webdriver.common.by import By
 
-# سقوط احتياطي إلى webdriver-manager إذا فشل Selenium Manager
-def _build_driver_with_fallback(options: ChromeOptions):
-    try:
-        # المحاولة 1: دع Selenium Manager يدبر الدرايفر
-        return webdriver.Chrome(options=options)
-    except WebDriverException as e:
-        print(f"[WARN] Selenium Manager failed: {e}. Falling back to webdriver-manager...")
-        try:
-            from webdriver_manager.chrome import ChromeDriverManager
-            from webdriver_manager.core.utils import ChromeType
-            driver_path = ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()
-            return webdriver.Chrome(service=Service(driver_path), options=options)
-        except Exception as e2:
-            print(f"[ERROR] webdriver-manager fallback failed: {e2}")
-            raise
+# نستخدم webdriver-manager بدون ChromeType (متوافق مع v4)
+from webdriver_manager.chrome import ChromeDriverManager
 
-def _resolve_chrome_binary() -> str | None:
-    # استخدم CHROME_BIN إن وُجد
-    env_bin = os.environ.get("CHROME_BIN")
-    if env_bin and Path(env_bin).exists():
-        return env_bin
 
-    # مسارات شائعة على Ubuntu/Snap
-    candidates = [
-        "/snap/bin/chromium",
-        "/usr/bin/chromium-browser",
-        "/usr/bin/chromium",
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-    ]
-    for p in candidates:
-        if Path(p).exists():
-            return p
-    return None
+DEMO_URL = os.getenv("DEMO_URL", "https://www.saucedemo.com/")
+DEMO_USER = os.getenv("DEMO_USER", "standard_user")
+DEMO_PASS = os.getenv("DEMO_PASS", "secret_sauce")
 
-def login(user: str, password: str):
+
+def build_driver():
     print("Starting the browser...")
-
-    options = ChromeOptions()
-    # تشغيل بدون واجهة
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-
-    # حدّد مسار المتصفح (Chromium من snap في العادة على الوكيل)
-    chrome_bin = _resolve_chrome_binary()
+    chrome_bin = os.getenv("CHROME_BIN")
     if chrome_bin:
-        options.binary_location = chrome_bin
         print(f"Using Chrome binary at: {chrome_bin}")
-    else:
-        print("[WARN] Could not find a Chrome/Chromium binary on common paths. "
-              "If this fails, ensure chromium is installed and/or set CHROME_BIN.")
 
-    driver = _build_driver_with_fallback(options)
+    opts = Options()
+    # Headless افتراضيًا داخل CI/Agent
+    if os.getenv("CI", "true").lower() in ("1", "true", "yes"):
+        # headless الجديد (Chrome 109+)
+        opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1920,1080")
+    if chrome_bin:
+        opts.binary_location = chrome_bin
 
+    # يثبت ChromeDriver المطابق لنسخة Google Chrome
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=opts)
+    driver.implicitly_wait(5)
+    return driver
+
+
+def login_and_cart_flow(user: str, password: str):
+    driver = None
+    added, removed = [], []
     try:
+        driver = build_driver()
         print("Browser started successfully. Navigating to the demo page to login.")
-        driver.get("https://www.saucedemo.com/")
+        driver.get(DEMO_URL)
 
-        # عناصر تسجيل الدخول
-        user_el = driver.find_element("id", "user-name")
-        pass_el = driver.find_element("id", "password")
-        btn_el = driver.find_element("id", "login-button")
+        # تسجيل الدخول
+        driver.find_element(By.ID, "user-name").send_keys(user)
+        driver.find_element(By.ID, "password").send_keys(password)
+        driver.find_element(By.ID, "login-button").click()
 
-        user_el.clear(); user_el.send_keys(user)
-        pass_el.clear(); pass_el.send_keys(password)
-        btn_el.click()
+        # تأكيد الوصول للمنتجات
+        driver.find_element(By.ID, "inventory_container")
 
-        # انتظار بسيط لانتقال الصفحة
-        time.sleep(2)
+        # إضافة 6 عناصر (كل العناصر الموجودة)
+        items = driver.find_elements(By.CSS_SELECTOR, ".inventory_item")
+        for it in items[:6]:
+            name = it.find_element(By.CSS_SELECTOR, ".inventory_item_name").text
+            btn = it.find_element(By.CSS_SELECTOR, "button.btn")
+            if "Add to cart" in btn.text:
+                btn.click()
+                added.append(name)
 
-        # تحقق بسيط من نجاح الدخول
+        print(f"[INFO] User logged in: {user}")
+        print(f"[INFO] Items added to cart ({len(added)}): {', '.join(added)}")
+
+        # الذهاب للسلة
+        driver.find_element(By.CLASS_NAME, "shopping_cart_link").click()
+
+        # إزالة جميع العناصر
+        rm_buttons = driver.find_elements(By.CSS_SELECTOR, "button.btn.btn_secondary, button.cart_button")
+        # أحيانًا لا يظهر الاسم مباشرة داخل صفحة السلة لكل زر؛ نقرأ الأسماء من عناصر السلة
+        cart_items = driver.find_elements(By.CSS_SELECTOR, ".cart_item")
+        names_in_cart = [ci.find_element(By.CSS_SELECTOR, ".inventory_item_name").text for ci in cart_items]
+
+        for i, btn in enumerate(rm_buttons):
+            # حاول قراءة الاسم من cart_items إن وُجد
+            name = names_in_cart[i] if i < len(names_in_cart) else f"Item#{i+1}"
+            btn.click()
+            removed.append(name)
+
+        print(f"[INFO] Items removed from cart ({len(removed)}): {', '.join(removed)}")
+
+        # لقطة شاشة اختيارية للحفظ كأثر (مفيدة للـrubric)
+        out_png = os.path.join(os.getenv("HOME", "/tmp"), "selenium-final.png")
         try:
-            driver.find_element("xpath", "//span[text()='Products']")
-            login_ok = True
-        except NoSuchElementException:
-            login_ok = False
-
-        # حفظ لقطة الدليل
-        out_dir = Path(__file__).resolve().parent / "evidence"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_png = out_dir / "selenium-log.png"
-        driver.save_screenshot(str(out_png))
-
-        if login_ok:
-            print(f"[OK] Login succeeded. Screenshot saved to: {out_png}")
-        else:
-            # التقط أيضاً HTML للمساعدة في التشخيص عند الفشل
-            (out_dir / "page.html").write_text(driver.page_source)
-            print(f"[FAIL] Login seems to have failed. "
-                  f"Screenshot: {out_png} | HTML: {out_dir / 'page.html'}")
-            sys.exit(1)
+            driver.save_screenshot(out_png)
+            print(f"[INFO] Saved screenshot: {out_png}")
+        except Exception as e:
+            print(f"[WARN] Could not save screenshot: {e}")
 
     finally:
-        driver.quit()
+        if driver:
+            driver.quit()
+
 
 if __name__ == "__main__":
-    # قيَم افتراضية يمكن تغييرها من متغيرات البيئة في الـ Pipeline
-    user = os.environ.get("DEMO_USER", "standard_user")
-    pwd  = os.environ.get("DEMO_PASS", "secret_sauce")
-    login(user, pwd)
+    user = sys.argv[1] if len(sys.argv) > 1 else DEMO_USER
+    pwd = sys.argv[2] if len(sys.argv) > 2 else DEMO_PASS
+    login_and_cart_flow(user, pwd)

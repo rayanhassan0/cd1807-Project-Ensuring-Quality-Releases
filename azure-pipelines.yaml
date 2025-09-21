@@ -358,27 +358,44 @@ stages:
           mkdir -p "$HOME/selenium"
           unzip -o "$(Pipeline.Workspace)/drop-uitests/$(Build.BuildId)-uitests.zip" -d "$HOME/selenium"
 
-          # تثبيت Chromium عند الحاجة
+          # تثبيت Google Chrome (أفضل من Chromium/Snap)
           if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get update -y
-            sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium || true
+            sudo apt-get install -y wget gnupg ca-certificates
+            sudo mkdir -p /etc/apt/keyrings
+            wget -qO- https://dl.google.com/linux/linux_signing_key.pub | sudo tee /etc/apt/keyrings/google-linux-signing-key.pub >/dev/null
+            echo "deb [signed-by=/etc/apt/keyrings/google-linux-signing-key.pub arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list >/dev/null
+            sudo apt-get update -y
+            sudo apt-get install -y google-chrome-stable
           fi
 
-          # نضيف /snap/bin للمسار ونحدد CHROME_BIN لاستخدامه من داخل سكربت بايثون
-          export PATH="/snap/bin:$PATH"
-          export CHROME_BIN="$(command -v chromium || command -v chromium-browser || echo /snap/bin/chromium)"
-          echo "Using CHROME_BIN=$CHROME_BIN"
+          export PATH="$HOME/.local/bin:/snap/bin:$PATH"
+          export CHROME_BIN="$(command -v google-chrome || true)"
+          echo "Using CHROME_BIN=${CHROME_BIN:-<not-found>}"
 
-          # ترقية pip وتثبيت المتطلبات (selenium + webdriver-manager)
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user -r "$HOME/selenium/requirements.txt"
 
           export DEMO_URL="https://www.saucedemo.com/"
           export DEMO_USER="standard_user"
           export DEMO_PASS="secret_sauce"
+          export CI=true
 
           python3 "$HOME/selenium/login.py"
+
+          # نسخ لقطة الشاشة (إن وُجدت) ونشرها كأرتيفاكت
+          SS="$HOME/selenium-final.png"
+          if [ -f "$SS" ]; then
+            mkdir -p "$(Build.ArtifactStagingDirectory)/selenium"
+            cp "$SS" "$(Build.ArtifactStagingDirectory)/selenium/selenium-final.png"
+          fi
           echo "Selenium finished."
+
+    - task: PublishPipelineArtifact@1
+      displayName: 'Publish Selenium Screenshot'
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)/selenium'
+        artifact: 'selenium-artifacts'
 
 # =============== CLEANUP ===============
 - stage: Cleanup
