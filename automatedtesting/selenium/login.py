@@ -2,105 +2,155 @@
 import os
 import sys
 import time
+from typing import List
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-
-# نستخدم webdriver-manager بدون ChromeType (متوافق مع v4)
-from webdriver_manager.chrome import ChromeDriverManager
-
-
-DEMO_URL = os.getenv("DEMO_URL", "https://www.saucedemo.com/")
-DEMO_USER = os.getenv("DEMO_USER", "standard_user")
-DEMO_PASS = os.getenv("DEMO_PASS", "secret_sauce")
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 
-def build_driver():
+DEMO_URL = os.environ.get("DEMO_URL", "https://www.saucedemo.com/")
+USER = os.environ.get("DEMO_USER", "standard_user")
+PWD = os.environ.get("DEMO_PASS", "secret_sauce")
+
+CHROME_BIN = os.environ.get("CHROME_BIN")  # نتوقع أن يمرره الـ YAML
+CHROMEDRIVER = os.environ.get("CHROMEDRIVER")  # نتوقع أن يمرره الـ YAML أو موجود بالنظام
+
+# عناصر CSS/IDs الشائعة في saucedemo
+USERNAME_ID = "user-name"
+PASSWORD_ID = "password"
+LOGIN_BTN_ID = "login-button"
+INVENTORY_ITEM = ".inventory_item"
+ADD_TO_CART_BTN = "button.btn_primary.btn_small.btn_inventory"
+CART_LINK = ".shopping_cart_link"
+CART_ITEM = ".cart_item"
+REMOVE_BTN = "button.btn_secondary.btn_small.cart_button"
+CART_BADGE = ".shopping_cart_badge"
+
+
+def _make_driver() -> webdriver.Chrome:
+    """يبني متصفح Chrome/Chromium بوضع headless، مع استخدام chromedriver المنصّب على النظام."""
     print("Starting the browser...")
-    chrome_bin = os.getenv("CHROME_BIN")
-    if chrome_bin:
-        print(f"Using Chrome binary at: {chrome_bin}")
-
     opts = Options()
-    # Headless افتراضيًا داخل CI/Agent
-    if os.getenv("CI", "true").lower() in ("1", "true", "yes"):
-        # headless الجديد (Chrome 109+)
-        opts.add_argument("--headless=new")
+
+    # نحدد مسار الباينري إذا متوفر (Chromium)
+    if CHROME_BIN:
+        print(f"Using Chrome binary at: {CHROME_BIN}")
+        opts.binary_location = CHROME_BIN
+    else:
+        print("CHROME_BIN not set; will rely on system default binary (chromium/chromium-browser).")
+
+    # تشغيل رأس-غيري headless + إعدادات للسيرفرات
+    opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1920,1080")
-    if chrome_bin:
-        opts.binary_location = chrome_bin
 
-    # يثبت ChromeDriver المطابق لنسخة Google Chrome
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=opts)
+    # نحاول استخدام chromedriver المحدد إن وجد
+    if CHROMEDRIVER and os.path.exists(CHROMEDRIVER):
+        print(f"Using chromedriver at: {CHROMEDRIVER}")
+        service = Service(CHROMEDRIVER)
+        return webdriver.Chrome(service=service, options=opts)
+
+    # محاولة بديلة: ابحث عن chromedriver في PATH الشائع
+    guess_paths = [
+        "/usr/bin/chromedriver",
+        "/usr/lib/chromium/chromedriver",
+        "/snap/bin/chromium.chromedriver",
+        "/usr/lib/chromium-browser/chromedriver",
+    ]
+    for p in guess_paths:
+        if os.path.exists(p):
+            print(f"Found chromedriver at: {p}")
+            service = Service(p)
+            return webdriver.Chrome(service=service, options=opts)
+
+    # كحل أخير: دع Selenium Manager يحاول (قد ينجح إذا الذاكرة تسمح)
+    print("No explicit chromedriver found. Falling back to Selenium Manager...")
+    return webdriver.Chrome(options=opts)
+
+
+def _wait(driver, by, value, timeout=20):
+    return WebDriverWait(driver, timeout).until(EC.presence_of_element_located((by, value)))
+
+
+def _wait_all(driver, by, value, timeout=20):
+    return WebDriverWait(driver, timeout).until(EC.presence_of_all_elements_located((by, value)))
+
+
+def login_and_test_flow() -> None:
+    driver = _make_driver()
+    driver.set_page_load_timeout(60)
     driver.implicitly_wait(5)
-    return driver
+    added: List[str] = []
+    removed: List[str] = []
 
-
-def login_and_cart_flow(user: str, password: str):
-    driver = None
-    added, removed = [], []
     try:
-        driver = build_driver()
-        print("Browser started successfully. Navigating to the demo page to login.")
+        print(f"Navigating to: {DEMO_URL}")
         driver.get(DEMO_URL)
 
-        # تسجيل الدخول
-        driver.find_element(By.ID, "user-name").send_keys(user)
-        driver.find_element(By.ID, "password").send_keys(password)
-        driver.find_element(By.ID, "login-button").click()
+        _wait(driver, By.ID, USERNAME_ID).send_keys(USER)
+        _wait(driver, By.ID, PASSWORD_ID).send_keys(PWD)
+        _wait(driver, By.ID, LOGIN_BTN_ID).click()
 
-        # تأكيد الوصول للمنتجات
-        driver.find_element(By.ID, "inventory_container")
+        # انتظر قائمة المنتجات
+        _wait_all(driver, By.CSS_SELECTOR, INVENTORY_ITEM)
 
-        # إضافة 6 عناصر (كل العناصر الموجودة)
-        items = driver.find_elements(By.CSS_SELECTOR, ".inventory_item")
-        for it in items[:6]:
-            name = it.find_element(By.CSS_SELECTOR, ".inventory_item_name").text
-            btn = it.find_element(By.CSS_SELECTOR, "button.btn")
-            if "Add to cart" in btn.text:
-                btn.click()
-                added.append(name)
+        # اجمع أسماء أول 6 منتجات (الموقع فيه 6 بالضبط)
+        items = driver.find_elements(By.CSS_SELECTOR, INVENTORY_ITEM)
+        items = items[:6]
 
-        print(f"[INFO] User logged in: {user}")
-        print(f"[INFO] Items added to cart ({len(added)}): {', '.join(added)}")
-
-        # الذهاب للسلة
-        driver.find_element(By.CLASS_NAME, "shopping_cart_link").click()
-
-        # إزالة جميع العناصر
-        rm_buttons = driver.find_elements(By.CSS_SELECTOR, "button.btn.btn_secondary, button.cart_button")
-        # أحيانًا لا يظهر الاسم مباشرة داخل صفحة السلة لكل زر؛ نقرأ الأسماء من عناصر السلة
-        cart_items = driver.find_elements(By.CSS_SELECTOR, ".cart_item")
-        names_in_cart = [ci.find_element(By.CSS_SELECTOR, ".inventory_item_name").text for ci in cart_items]
-
-        for i, btn in enumerate(rm_buttons):
-            # حاول قراءة الاسم من cart_items إن وُجد
-            name = names_in_cart[i] if i < len(names_in_cart) else f"Item#{i+1}"
+        # أضف إلى السلة
+        for i, item in enumerate(items, start=1):
+            title_el = item.find_element(By.CLASS_NAME, "inventory_item_name")
+            name = title_el.text.strip()
+            btn = item.find_element(By.CSS_SELECTOR, ADD_TO_CART_BTN)
             btn.click()
+            added.append(name)
+            print(f"[ADD] {i}. {name}")
+
+        # افتح السلة وتحقق
+        _wait(driver, By.CSS_SELECTOR, CART_LINK).click()
+        cart_items = _wait_all(driver, By.CSS_SELECTOR, CART_ITEM)
+        print(f"Cart has {len(cart_items)} items after adding.")
+
+        # احذف الكل
+        for i, ci in enumerate(cart_items, start=1):
+            name = ci.find_element(By.CLASS_NAME, "inventory_item_name").text.strip()
+            ci.find_element(By.CSS_SELECTOR, REMOVE_BTN).click()
             removed.append(name)
+            print(f"[REMOVE] {i}. {name}")
 
-        print(f"[INFO] Items removed from cart ({len(removed)}): {', '.join(removed)}")
+        # تحقّق أن الشارة اختفت (السلة فاضية)
+        time.sleep(1)
+        badge = driver.find_elements(By.CSS_SELECTOR, CART_BADGE)
+        empty = (len(badge) == 0)
+        result = "PASS" if empty and len(added) == len(removed) == 6 else "FAIL"
 
-        # لقطة شاشة اختيارية للحفظ كأثر (مفيدة للـrubric)
-        out_png = os.path.join(os.getenv("HOME", "/tmp"), "selenium-final.png")
-        try:
-            driver.save_screenshot(out_png)
-            print(f"[INFO] Saved screenshot: {out_png}")
-        except Exception as e:
-            print(f"[WARN] Could not save screenshot: {e}")
+        print("\n===== SELENIUM RUN SUMMARY =====")
+        print(f"USER: {USER}")
+        print(f"ADDED  ({len(added)}): {added}")
+        print(f"REMOVED({len(removed)}): {removed}")
+        print(f"RESULT: {result}")
+        print("================================\n")
+
+        if result != "PASS":
+            raise RuntimeError("Functional assertions failed.")
 
     finally:
-        if driver:
+        try:
             driver.quit()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
-    user = sys.argv[1] if len(sys.argv) > 1 else DEMO_USER
-    pwd = sys.argv[2] if len(sys.argv) > 2 else DEMO_PASS
-    login_and_cart_flow(user, pwd)
+    try:
+        login_and_test_flow()
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
