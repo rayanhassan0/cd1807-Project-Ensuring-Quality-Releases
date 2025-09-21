@@ -250,13 +250,51 @@ stages:
           - download: current
             artifact: drop-fakerestapi
 
+          # اضبط إعدادات التطبيق مسبقًا لتفادي تعليق Kudu/Oryx
+          - task: AzureCLI@2
+            displayName: 'Pre-set App Settings'
+            inputs:
+              azureSubscription: '$(azureServiceConnectionId)'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -e
+                APP="$(appServiceName)-$(Build.BuildId)"
+                az webapp config appsettings set -g "$(resourceGroup)" -n "$APP" --settings \
+                  WEBSITE_RUN_FROM_PACKAGE=1 \
+                  SCM_DO_BUILD_DURING_DEPLOYMENT=false \
+                  SCM_COMMAND_IDLE_TIMEOUT=1800 \
+                  WEBSITES_CONTAINER_START_TIME_LIMIT=1800
+
           - task: AzureWebApp@1
             displayName: 'Deploy Azure Web App'
+            timeoutInMinutes: 20
             inputs:
               azureSubscription: '$(azureServiceConnectionId)'
               appName: '$(appServiceName)-$(Build.BuildId)'
-              appType: 'webApp'
+              appType: 'webAppLinux'   # مهم لو الخطة Linux
               package: '$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip'
+              deploymentMethod: 'zipDeploy'
+              appSettings: |
+                WEBSITE_RUN_FROM_PACKAGE=1
+                SCM_DO_BUILD_DURING_DEPLOYMENT=false
+                SCM_COMMAND_IDLE_TIMEOUT=1800
+                WEBSITES_CONTAINER_START_TIME_LIMIT=1800
+
+          # فحص سريع بعد النشر
+          - task: Bash@3
+            displayName: 'Smoke check'
+            inputs:
+              targetType: inline
+              script: |
+                set -euxo pipefail
+                APPURL="https://$(appServiceName)-$(Build.BuildId).azurewebsites.net"
+                for i in 1 2 3 4 5; do
+                  echo "GET $APPURL  (try $i)"
+                  curl -sSf -m 10 "$APPURL" >/dev/null && { echo "UP: $APPURL"; exit 0; } || sleep 5
+                done
+                echo "App did not respond 200 in time" >&2
+                exit 1
 
           - download: current
             artifact: drop-perftests
@@ -435,7 +473,7 @@ stages:
           # 11) مجلدات مؤقتة لكروم لتجنّب DevToolsActivePort
           export CHROME_TMP_BASE="$(mktemp -d)"
           export CHROME_USER_DATA_DIR="${CHROME_TMP_BASE}/user-data"
-          export CHROME_CACHE_DIR="${CHROME_TMP_BASE}/cache"
+          export CHROME_CACHE_DIR="${CHROME_TMP_BASE}/cache"}
           mkdir -p "$CHROME_USER_DATA_DIR" "$CHROME_CACHE_DIR"
           echo "Temp chrome dir: $CHROME_TMP_BASE"
 
