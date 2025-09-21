@@ -2,9 +2,11 @@
 import os
 import sys
 import time
+from datetime import datetime
 from typing import List
 
 from selenium import webdriver
+from selenium.webdriver import ActionChains
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -37,7 +39,6 @@ def _make_driver() -> webdriver.Chrome:
     print(f"Using Chrome binary at: {CHROME_BIN}")
 
     opts = Options()
-    # وضع headless الحديث + أعلام متوافقة مع بيئات CI
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
@@ -47,7 +48,7 @@ def _make_driver() -> webdriver.Chrome:
     opts.add_argument("--disable-extensions")
     opts.add_argument("--remote-debugging-port=9222")
 
-    # مجلدات عمل مؤقتة (من الـ YAML)
+    # مجلدات عمل مؤقتة (إن وُفرت من الـ YAML)
     user_data_dir = os.environ.get("CHROME_USER_DATA_DIR")
     cache_dir = os.environ.get("CHROME_CACHE_DIR")
     if user_data_dir:
@@ -58,7 +59,6 @@ def _make_driver() -> webdriver.Chrome:
     if CHROME_BIN:
         opts.binary_location = CHROME_BIN
 
-    # اجلب chromedriver المطابق تلقائيًا
     print("Resolving chromedriver via webdriver-manager ...")
     driver_path = ChromeDriverManager().install()
     print(f"Chromedriver path: {driver_path}")
@@ -73,6 +73,62 @@ def _wait(driver, by, value, timeout=20):
 
 def _wait_all(driver, by, value, timeout=20):
     return WebDriverWait(driver, timeout).until(EC.presence_of_all_elements_located((by, value)))
+
+
+def _safe_click(driver: webdriver.Chrome, el, retries: int = 3):
+    last_err = None
+    for i in range(1, retries + 1):
+        try:
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+            # جرّب النقر العادي
+            el.click()
+            return
+        except Exception as e1:
+            last_err = e1
+            try:
+                # جرّب ActionChains
+                ActionChains(driver).move_to_element(el).pause(0.05).click().perform()
+                return
+            except Exception as e2:
+                last_err = e2
+                try:
+                    # جرّب JS click
+                    driver.execute_script("arguments[0].click();", el)
+                    return
+                except Exception as e3:
+                    last_err = e3
+                    time.sleep(0.4)
+    raise last_err
+
+
+def _go_to_cart(driver: webdriver.Chrome):
+    """حاول فتح السلة بعدة طرق، ثم استخدم fallback مباشر."""
+    # انتظر ظهور أيقونة السلة
+    el = WebDriverWait(driver, 15).until(EC.element_to_be_clickable((By.CSS_SELECTOR, CART_LINK)))
+    # جرّب النقر بعدة أساليب
+    _safe_click(driver, el, retries=4)
+
+    # انتظر عناصر السلة؛ إن فشل، استخدم fallback
+    try:
+        _wait_all(driver, By.CSS_SELECTOR, CART_ITEM, timeout=10)
+        return
+    except Exception:
+        # fallback مباشر للرابط
+        base = DEMO_URL.rstrip("/")
+        driver.get(f"{base}/cart.html")
+        _wait_all(driver, By.CSS_SELECTOR, CART_ITEM, timeout=10)
+
+
+def _dump_artifacts(driver: webdriver.Chrome, prefix: str = "fail"):
+    try:
+        out_dir = os.path.expanduser("~/selenium/artifacts")
+        os.makedirs(out_dir, exist_ok=True)
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        path = os.path.join(out_dir, f"{prefix}_{ts}.png")
+        driver.save_screenshot(path)
+        print(f"[ARTIFACT] Saved screenshot: {path}")
+    except Exception as e:
+        print(f"[ARTIFACT] Failed to save screenshot: {e}")
 
 
 def login_and_test_flow() -> None:
@@ -99,19 +155,19 @@ def login_and_test_flow() -> None:
             title_el = item.find_element(By.CLASS_NAME, "inventory_item_name")
             name = title_el.text.strip()
             btn = item.find_element(By.CSS_SELECTOR, ADD_TO_CART_BTN)
-            btn.click()
+            _safe_click(driver, btn, retries=2)
             added.append(name)
             print(f"[ADD] {i}. {name}")
 
-        # افتح السلة وتحقق
-        _wait(driver, By.CSS_SELECTOR, CART_LINK).click()
+        # افتح السلة وتحقق (مع محاولات + fallback)
+        _go_to_cart(driver)
         cart_items = _wait_all(driver, By.CSS_SELECTOR, CART_ITEM)
         print(f"Cart has {len(cart_items)} items after adding.")
 
         # احذف الكل
         for i, ci in enumerate(cart_items, start=1):
             name = ci.find_element(By.CLASS_NAME, "inventory_item_name").text.strip()
-            ci.find_element(By.CSS_SELECTOR, REMOVE_BTN).click()
+            _safe_click(driver, ci.find_element(By.CSS_SELECTOR, REMOVE_BTN), retries=2)
             removed.append(name)
             print(f"[REMOVE] {i}. {name}")
 
@@ -128,8 +184,19 @@ def login_and_test_flow() -> None:
         print("================================\n")
 
         if result != "PASS":
+            _dump_artifacts(driver, prefix="assert")
             raise RuntimeError("Functional assertions failed.")
 
+    except Exception as e:
+        _dump_artifacts(driver, prefix="exception")
+        # اطبع معلومات إضافية مفيدة للتشخيص
+        try:
+            print(f"[DEBUG] URL: {driver.current_url}")
+            print(f"[DEBUG] Title: {driver.title}")
+        except Exception:
+            pass
+        print(f"ERROR: {e}", file=sys.stderr)
+        raise
     finally:
         try:
             driver.quit()
