@@ -33,3 +33,10 @@ override.tf.json
 
 # Do NOT commit real secrets
 **/*.tfvars
+
+# Local artifacts / submissions
+submit/
+zip-check/
+*.zip
+screenshots/
+
