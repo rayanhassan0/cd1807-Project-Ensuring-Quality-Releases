@@ -294,20 +294,12 @@ stages:
                   echo "JMeter JMX not found under perftests/. Expected Starter.jmx" && ls -la perftests && exit 1
                 fi
                 APPURL="https://$(appServiceName)-$(Build.BuildId).azurewebsites.net"
-                echo "Testing against: $APPURL"
-                echo "Using JMX: $JMX"
-                DURATION=120
-                THREADS=10
-                RAMPUP=10
-                echo "Starting standalone test @ $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+                echo "Starting standalone test @ $(date -u +'%Y-%m-%dT%H:%M:%SZ')"   # <<< مطلوب بالمراجعة
                 set +e
                 "$JM/bin/jmeter" -n -t "$JMX" \
                   -JAPPSERVICEURL="$APPURL" \
                   -JAPP_URL="$APPURL" \
                   -JBASE_URL="$APPURL" \
-                  -JdurationSeconds="$DURATION" \
-                  -Jthreads="$THREADS" \
-                  -Jrampup="$RAMPUP" \
                   -Jsummariser.name=summary \
                   -l perftests/results.jtl
                 JM_EXIT=$?
@@ -318,9 +310,6 @@ stages:
                 else
                   echo "<html><body><h2>No JMeter data written to results.jtl</h2></body></html>" > perftests/html-report/index.html
                 fi
-                echo "Tree under $(pwd):"; ls -la
-                echo "Tree under perftests:"; ls -la perftests || true
-                echo "Tree under perftests/html-report:"; ls -la perftests/html-report || true
                 echo "JMeter finished with exit code: $JM_EXIT"
 
           - task: PublishPipelineArtifact@1
@@ -356,7 +345,6 @@ stages:
             sudo snap install chromium --channel=latest/stable
           fi
 
-          # انتظر ظهور chromedriver الخاص بالـsnap
           for i in 1 2 3 4 5; do
             if [ -x /snap/bin/chromium.chromedriver ]; then break; fi
             echo "Waiting for /snap/bin/chromium.chromedriver (attempt $i) ..."
@@ -367,15 +355,11 @@ stages:
           export CHROME_BIN="/snap/bin/chromium"
           export CHROMEDRIVER="/snap/bin/chromium.chromedriver"
 
-          echo "Using CHROME_BIN=${CHROME_BIN}"
-          echo "Using CHROMEDRIVER=${CHROMEDRIVER}"
           "$CHROME_BIN" --version || true
           "$CHROMEDRIVER" --version || true
 
-          # تقليل مشاكل الذاكرة
           ulimit -n 4096 || true
 
-          # تحديث pip وتثبيت المتطلبات
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user -r "$HOME/selenium/requirements.txt"
 
