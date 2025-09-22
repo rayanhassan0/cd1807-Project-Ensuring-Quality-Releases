@@ -255,45 +255,45 @@ stages:
               ls -lh "$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
             displayName: 'Show package size'
 
+          # نشر بدون Kudu: رفع ZIP إلى Blob + SAS + WEBSITE_RUN_FROM_PACKAGE
           - task: AzureCLI@2
-            displayName: 'Pre-check Kudu & set app settings'
+            displayName: 'Deploy via Run-From-Package (Blob SAS) — no Kudu'
             inputs:
               azureSubscription: '$(azureServiceConnectionId)'
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
                 set -e
-                APP="$(appServiceName)-$(Build.BuildId)"
                 RG="$(resourceGroup)"
-                if ! command -v curl >/dev/null 2>&1; then
-                  sudo apt-get update -y && sudo apt-get install -y curl
-                fi
-                URL="https://$APP.scm.azurewebsites.net/api/settings"
-                code=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true)
-                echo "Kudu probe: $URL -> $code"
-                if [ "$code" != "200" ]; then
-                  echo "Restarting $APP because Kudu is $code ..."
-                  az webapp restart -g "$RG" -n "$APP"
-                  sleep 15
-                fi
-                az webapp config appsettings set -g "$RG" -n "$APP" \
-                  --settings WEBSITE_RUN_FROM_PACKAGE=1 SCM_DO_BUILD_DURING_DEPLOYMENT=false ENABLE_ORYX_BUILD=false
-
-          # ===== نشر عبر CLI بدل AzureWebApp@1 =====
-          - task: AzureCLI@2
-            displayName: 'Deploy via az webapp deploy (zip, clean)'
-            inputs:
-              azureSubscription: '$(azureServiceConnectionId)'
-              scriptType: bash
-              scriptLocation: inlineScript
-              inlineScript: |
-                set -e
                 APP="$(appServiceName)-$(Build.BuildId)"
-                RG="$(resourceGroup)"
+                SA="tfstatebootstrap01"   # غيّر الاسم إذا استخدمت SA مختلف
+                CN="webpackages"
                 ZIP="$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
-                echo "Deploying $ZIP to $APP ..."
-                az webapp deploy -g "$RG" -n "$APP" --type zip --src-path "$ZIP" --clean true --timeout 1800
-                echo "Deploy done."
+                BLOB="$(Build.BuildId)-fakerestapi.zip"
+
+                KEY=$(az storage account keys list -g "$RG" -n "$SA" --query "[0].value" -o tsv)
+                az storage container create --account-name "$SA" --name "$CN" --account-key "$KEY" --auth-mode key >/dev/null
+
+                echo "Upload package to blob..."
+                az storage blob upload \
+                  --account-name "$SA" --account-key "$KEY" \
+                  --container-name "$CN" --name "$BLOB" \
+                  --file "$ZIP" --overwrite true --auth-mode key
+
+                echo "Generate read-only SAS for 7 days..."
+                EXP="$(date -u -d '+7 days' +'%Y-%m-%dT%H:%MZ')"
+                SAS=$(az storage blob generate-sas \
+                  --account-name "$SA" --account-key "$KEY" \
+                  --container-name "$CN" --name "$BLOB" \
+                  --permissions r --expiry "$EXP" -o tsv)
+
+                URL="https://$SA.blob.core.windows.net/$CN/$BLOB?$SAS"
+                echo "Set WEBSITE_RUN_FROM_PACKAGE to SAS URL"
+                az webapp config appsettings set -g "$RG" -n "$APP" \
+                  --settings WEBSITE_RUN_FROM_PACKAGE="$URL" SCM_DO_BUILD_DURING_DEPLOYMENT=false ENABLE_ORYX_BUILD=false
+
+                echo "Restart app"
+                az webapp restart -g "$RG" -n "$APP"
 
           - task: Bash@3
             displayName: 'Warm up app'
