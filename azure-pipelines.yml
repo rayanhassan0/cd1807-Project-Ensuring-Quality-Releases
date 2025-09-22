@@ -139,14 +139,28 @@ stages:
         targetType: inline
         script: |
           set -e
-          if command -v apt-get >/div/null 2>&1; then
+          # detect and install only missing tools
+          NEED_PKGS=""
+          command -v zip     >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS zip"
+          command -v unzip   >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS unzip"
+          command -v pip3    >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS python3-pip"
+
+          if [ -z "$NEED_PKGS" ]; then
+            echo "zip/unzip/pip3 already present. Skipping install."
+            exit 0
+          fi
+
+          echo "Installing: $NEED_PKGS"
+          if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get update -y
-            sudo apt-get install -y zip unzip python3-pip
+            sudo apt-get install -y $NEED_PKGS
           elif command -v yum >/dev/null 2>&1; then
-            sudo yum install -y zip unzip python3-pip
+            sudo yum install -y $NEED_PKGS
+          elif command -v zypper >/dev/null 2>&1; then
+            sudo zypper install -y $NEED_PKGS
           else
-            echo "Unknown package manager; please install zip/unzip manually" >&2
-            exit 1
+            echo "WARN: Unknown package manager; could not install: $NEED_PKGS"
+            echo "Continuing pipeline anyway..."
           fi
 
     - task: NodeTool@0
@@ -345,14 +359,13 @@ stages:
           - download: current
             artifact: jmeter-bin
 
-          # === الإضافة الجديدة: تثبيت Java + إصلاح صلاحيات JMeter بعد تنزيل الـ artifact ===
+          # === NEW: Install Java and fix JMeter exec permissions ===
           - task: Bash@3
             displayName: 'Prep JMeter: install Java + chmod bin'
             inputs:
               targetType: inline
               script: |
                 set -e
-                # Ensure Java exists (JMeter requires JRE/JDK)
                 if ! command -v java >/dev/null 2>&1; then
                   if command -v apt-get >/dev/null 2>&1; then
                     sudo apt-get update -y
@@ -390,10 +403,8 @@ stages:
                 JM_VER=5.6.3
                 JM="$(Pipeline.Workspace)/jmeter-bin/apache-jmeter-${JM_VER}"
 
-                # فحص مُحسّن مع محاولة chmod كحل أخير
                 if [ ! -x "$JM/bin/jmeter" ]; then
                   echo "JMeter launcher not executable at: $JM/bin/jmeter"
-                  echo "Listing:"
                   ls -la "$JM/bin" || true
                   echo "Applying chmod +x (last resort)..."
                   chmod -R +x "$JM/bin" || true
