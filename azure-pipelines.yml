@@ -250,13 +250,11 @@ stages:
           - download: current
             artifact: drop-fakerestapi
 
-          # Show package size (helps diagnose slow deploys)
           - bash: |
               set -e
               ls -lh "$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
             displayName: 'Show package size'
 
-          # Probe Kudu + set app settings to disable Oryx and enforce Run-From-Package
           - task: AzureCLI@2
             displayName: 'Pre-check Kudu & set app settings'
             inputs:
@@ -281,35 +279,22 @@ stages:
                 az webapp config appsettings set -g "$RG" -n "$APP" \
                   --settings WEBSITE_RUN_FROM_PACKAGE=1 SCM_DO_BUILD_DURING_DEPLOYMENT=false ENABLE_ORYX_BUILD=false
 
-          - task: AzureWebApp@1
-            displayName: 'Deploy Azure Web App (ZIP Deploy)'
+          # ===== نشر عبر CLI بدل AzureWebApp@1 =====
+          - task: AzureCLI@2
+            displayName: 'Deploy via az webapp deploy (zip, clean)'
             inputs:
               azureSubscription: '$(azureServiceConnectionId)'
-              appName: '$(appServiceName)-$(Build.BuildId)'
-              appType: 'webApp'
-              package: '$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip'
-              appSettings: |
-                -WEBSITE_RUN_FROM_PACKAGE 1
-                -SCM_DO_BUILD_DURING_DEPLOYMENT false
-                -ENABLE_ORYX_BUILD false
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -e
+                APP="$(appServiceName)-$(Build.BuildId)"
+                RG="$(resourceGroup)"
+                ZIP="$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
+                echo "Deploying $ZIP to $APP ..."
+                az webapp deploy -g "$RG" -n "$APP" --type zip --src-path "$ZIP" --clean true --timeout 1800
+                echo "Deploy done."
 
-          # If 503 persists, comment the task above and use this CLI-based deploy instead
-          # - task: AzureCLI@2
-          #   displayName: 'Deploy via az webapp deploy (zip)'
-          #   inputs:
-          #     azureSubscription: '$(azureServiceConnectionId)'
-          #     scriptType: bash
-          #     scriptLocation: inlineScript
-          #     inlineScript: |
-          #       set -e
-          #       APP="$(appServiceName)-$(Build.BuildId)"
-          #       RG="$(resourceGroup)"
-          #       ZIP="$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
-          #       az webapp config appsettings set -g "$RG" -n "$APP" --settings WEBSITE_RUN_FROM_PACKAGE=1 SCM_DO_BUILD_DURING_DEPLOYMENT=false ENABLE_ORYX_BUILD=false
-          #       echo "Deploying $ZIP to $APP ..."
-          #       az webapp deploy -g "$RG" -n "$APP" --type zip --src-path "$ZIP" --clean true
-
-          # Warm-up before JMeter
           - task: Bash@3
             displayName: 'Warm up app'
             inputs:
