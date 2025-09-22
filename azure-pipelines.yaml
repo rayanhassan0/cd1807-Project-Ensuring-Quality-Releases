@@ -133,17 +133,29 @@ stages:
         commandOptions: '-auto-approve -var="app_service_name=$(appServiceName)-$(Build.BuildId)"'
         environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
 
+    # ===== FIXED: Install CLI deps =====
     - task: Bash@3
       displayName: 'Install CLI deps (zip, unzip, pip)'
       inputs:
         targetType: inline
         script: |
-          set -e
-          if command -v apt-get >/dev/null 2nd &1; then
+          set -euxo pipefail
+          need_zip=0;   command -v zip >/dev/null   || need_zip=1
+          need_unzip=0; command -v unzip >/dev/null || need_unzip=1
+          need_pip=0;   command -v pip3 >/dev/null  || need_pip=1
+          if [ $need_zip -eq 0 ] && [ $need_unzip -eq 0 ] && [ $need_pip -eq 0 ]; then
+            echo "zip/unzip/pip3 already installed"
+            exit 0
+          fi
+          if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get update -y
             sudo apt-get install -y zip unzip python3-pip
           elif command -v yum >/dev/null 2>&1; then
-            sudo yum install -y zip unzip python3-pip
+            sudo yum install -y zip unzip python3-pip || sudo yum install -y zip unzip python3
+          elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y zip unzip python3-pip
+          elif command -v zypper >/dev/null 2>&1; then
+            sudo zypper install -y zip unzip python3-pip
           else
             echo "Unknown package manager; please install zip/unzip manually" >&2
             exit 1
@@ -330,7 +342,6 @@ stages:
                 # تأكيد وجود التقرير
                 if [ ! -s perftests/results.jtl ] || [ ! -f perftests/html-report/index.html ]; then
                   echo "JMeter run produced no samples — check JMX/URL"
-                  # لا نفشل الستيب لكن نخلي الآرتيفاكت يوضح الحالة
                   echo "<html><body><h2>No JMeter data written to results.jtl</h2></body></html>" > perftests/html-report/index.html
                 fi
 
