@@ -234,6 +234,32 @@ stages:
       displayName: 'Publish Perf Tests Artifact'
       artifact: drop-perftests
 
+    # ==== جهّز JMeter مرة واحدة وانشره كـ artifact ====
+    - task: Bash@3
+      displayName: 'Download JMeter binary (once)'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+          JM_VER=5.6.3
+          mkdir -p "$(Build.ArtifactStagingDirectory)/jmeter"
+          cd "$(Build.ArtifactStagingDirectory)/jmeter"
+          echo "Fetching JMeter $JM_VER ..."
+          for URL in \
+            "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JM_VER}.tgz" \
+            "https://downloads.apache.org/jmeter/binaries/apache-jmeter-${JM_VER}.tgz" ; do
+            echo "Trying $URL"
+            curl -L --fail --retry 8 --retry-connrefused --connect-timeout 10 --max-time 600 -o apache-jmeter.tgz "$URL" && break || true
+          done
+          [ -s apache-jmeter.tgz ] || { echo "Failed to download JMeter"; exit 1; }
+          tar -xzf apache-jmeter.tgz
+          rm -f apache-jmeter.tgz
+          ls -la
+
+    - publish: $(Build.ArtifactStagingDirectory)/jmeter
+      displayName: 'Publish JMeter binary artifact'
+      artifact: jmeter-bin
+
 # =============== DEPLOY ===============
 - stage: Deploy
   dependsOn: Build
@@ -255,7 +281,7 @@ stages:
               ls -lh "$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
             displayName: 'Show package size'
 
-          # نشر بدون Kudu: رفع ZIP إلى Blob + SAS + WEBSITE_RUN_FROM_PACKAGE
+          # نشر بدون Kudu: Blob SAS + WEBSITE_RUN_FROM_PACKAGE
           - task: AzureCLI@2
             displayName: 'Deploy via Run-From-Package (Blob SAS) — no Kudu'
             inputs:
@@ -266,7 +292,7 @@ stages:
                 set -e
                 RG="$(resourceGroup)"
                 APP="$(appServiceName)-$(Build.BuildId)"
-                SA="tfstatebootstrap01"   # غيّر الاسم إذا استخدمت SA مختلف
+                SA="tfstatebootstrap01"   # غيّره إذا لزم
                 CN="webpackages"
                 ZIP="$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
                 BLOB="$(Build.BuildId)-fakerestapi.zip"
@@ -317,6 +343,10 @@ stages:
           - download: current
             artifact: drop-perftests
 
+          # نزّل JMeter الجاهز من مرحلة Build
+          - download: current
+            artifact: jmeter-bin
+
           - task: Bash@3
             displayName: 'Run JMeter (Performance)'
             timeoutInMinutes: 30
@@ -326,22 +356,16 @@ stages:
                 set -e
                 cd "$(Pipeline.Workspace)"
                 mkdir -p perf && cd perf
-                if ! command -v java >/dev/null 2>&1; then
-                  if command -v apt-get >/dev/null 2>&1; then
-                    sudo apt-get update -y
-                    sudo apt-get install -y openjdk-11-jre-headless
-                  elif command -v yum >/dev/null 2>&1; then
-                    sudo yum install -y java-11-openjdk
-                  fi
-                fi
+
+                # استخدم JMeter المنشور (بدون تحميل من الإنترنت)
                 JM_VER=5.6.3
-                for i in 1 2 3 4 5; do
-                  echo "Downloading JMeter attempt $i..."
-                  curl -L --fail -o apache-jmeter.tgz "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JM_VER}.tgz" && break || sleep 5
-                done
-                tar -xzf apache-jmeter.tgz
+                JM="$(Pipeline.Workspace)/jmeter-bin/apache-jmeter-${JM_VER}"
+                if [ ! -x "$JM/bin/jmeter" ]; then
+                  echo "JMeter not found at $JM" && ls -la "$(Pipeline.Workspace)/jmeter-bin" && exit 1
+                fi
+
                 unzip -o "$(Pipeline.Workspace)/drop-perftests/$(Build.BuildId)-perftests.zip" -d perftests
-                JM="$(pwd)/apache-jmeter-${JM_VER}"
+
                 if [ -f "perftests/Starter.jmx" ]; then
                   JMX="perftests/Starter.jmx"
                 elif [ -f "perftests/PerformanceTestSuite.jmx" ]; then
@@ -349,6 +373,7 @@ stages:
                 else
                   echo "JMeter JMX not found under perftests/. Expected Starter.jmx" && ls -la perftests && exit 1
                 fi
+
                 APPURL="https://$(appServiceName)-$(Build.BuildId).azurewebsites.net"
                 echo "Starting standalone test @ $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
                 set +e
@@ -360,6 +385,7 @@ stages:
                   -l perftests/results.jtl
                 JM_EXIT=$?
                 set -e
+
                 mkdir -p perftests/html-report
                 if [ -s perftests/results.jtl ]; then
                   "$JM/bin/jmeter" -g perftests/results.jtl -o perftests/html-report || true
