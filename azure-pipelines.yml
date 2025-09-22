@@ -1,4 +1,5 @@
 name: Azure Pipelines
+
 trigger:
 - main
 
@@ -14,6 +15,7 @@ variables:
   appServiceName: 'myapp-AppService'
 
 stages:
+# =============== BUILD ===============
 - stage: Build
   jobs:
   - job: BuildInfrastructure
@@ -25,10 +27,7 @@ stages:
         azureSubscription: '$(azureServiceConnectionId)'
         scriptType: bash
         scriptLocation: inlineScript
-        inlineScript: |
-          set -euxo pipefail
-          date -u +"UTC %Y-%m-%dT%H:%M:%SZ"
-          az account show
+        inlineScript: az account show
 
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
       displayName: 'Terraform installation'
@@ -40,19 +39,23 @@ stages:
       inputs:
         targetType: inline
         script: |
-          set -euxo pipefail
+          set -e
           rm -rf "$(System.DefaultWorkingDirectory)/terraform/environments/test/.terraform"
 
     - task: Bash@3
-      displayName: 'Debug: list terraform folders'
+      displayName: 'Debug: list terraform folder and modules'
       inputs:
         targetType: inline
         script: |
-          set -euxo pipefail
-          ls -la "$(System.DefaultWorkingDirectory)/terraform/environments/test" || true
+          set -e
+          echo "---- env test ----"
+          ls -la "$(System.DefaultWorkingDirectory)/terraform/environments/test"
+          echo "---- modules/appservice ----"
           ls -la "$(System.DefaultWorkingDirectory)/terraform/modules/appservice" || true
+          echo "---- modules/network ----"
           ls -la "$(System.DefaultWorkingDirectory)/terraform/modules/network" || true
-          sed -n '1,200p' "$(System.DefaultWorkingDirectory)/terraform/environments/test/terraform.tfvars" || true
+          echo "---- terraform.tfvars ----"
+          sed -n '1,200p' "$(System.DefaultWorkingDirectory)/terraform/environments/test/terraform.tfvars"
 
     - task: AzureCLI@2
       displayName: 'Ensure backend storage exists'
@@ -61,15 +64,17 @@ stages:
         scriptType: bash
         scriptLocation: inlineScript
         inlineScript: |
-          set -euxo pipefail
+          set -e
           RG="$(resourceGroup)"
           LOC="westus3"
           SA="tfstatebootstrap01"
+          echo "Ensure SA=$SA RG=$RG LOC=$LOC"
           if ! az storage account show -g "$RG" -n "$SA" >/dev/null 2>&1; then
             az storage account create -g "$RG" -n "$SA" -l "$LOC" --sku Standard_LRS
           fi
           KEY=$(az storage account keys list -g "$RG" -n "$SA" --query "[0].value" -o tsv)
           az storage container create --name tfstate --account-name "$SA" --auth-mode key --account-key "$KEY" >/dev/null
+          echo "Backend ready."
 
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
       displayName: 'Terraform init'
@@ -84,6 +89,23 @@ stages:
         backendAzureRmKey: 'test.terraform.tfstate'
         backendAzureRmUseOidc: false
         backendAzureRmUseMsi: false
+
+    - task: AzureCLI@2
+      displayName: 'TF import existing resources into state (one-time)'
+      inputs:
+        azureSubscription: '$(azureServiceConnectionId)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -e
+          cd "$(System.DefaultWorkingDirectory)/terraform/environments/test"
+          terraform import -input=false 'module.network.azurerm_virtual_network.vnet' \
+            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Network/virtualNetworks/vnet-test' || true
+          terraform import -input=false 'module.network.azurerm_subnet.subnet_test' \
+            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Network/virtualNetworks/vnet-test/subnets/subnet-test' || true
+          terraform import -input=false 'module.appservice.azurerm_service_plan.plan' \
+            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Web/serverFarms/myapp-plan' || true
+          terraform state list || true
 
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
       displayName: 'Terraform validate'
@@ -116,23 +138,15 @@ stages:
       inputs:
         targetType: inline
         script: |
-          set -euxo pipefail
-          need_zip=0;   command -v zip >/dev/null   || need_zip=1
-          need_unzip=0; command -v unzip >/dev/null || need_unzip=1
-          need_pip=0;   command -v pip3 >/dev/null  || need_pip=1
-          if [ $need_zip -eq 0 ] && [ $need_unzip -eq 0 ] && [ $need_pip -eq 0 ]; then
-            echo "zip/unzip/pip3 already installed"; exit 0; fi
+          set -e
           if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get update -y
             sudo apt-get install -y zip unzip python3-pip
           elif command -v yum >/dev/null 2>&1; then
-            sudo yum install -y zip unzip python3-pip || sudo yum install -y zip unzip python3
-          elif command -v dnf >/dev/null 2>&1; then
-            sudo dnf install -y zip unzip python3-pip
-          elif command -v zypper >/dev/null 2>&1; then
-            sudo zypper install -y zip unzip python3-pip
+            sudo yum install -y zip unzip python3-pip
           else
-            echo "Unknown package manager" >&2; exit 1
+            echo "Unknown package manager; please install zip/unzip manually" >&2
+            exit 1
           fi
 
     - task: NodeTool@0
@@ -151,7 +165,7 @@ stages:
       inputs:
         targetType: inline
         script: |
-          set -euxo pipefail
+          set -e
           mkdir -p '$(Build.SourcesDirectory)/automatedtesting/postman/results'
           rm -f   '$(Build.SourcesDirectory)/automatedtesting/postman/results/'*.xml
 
@@ -194,7 +208,7 @@ stages:
         includeRootFolder: false
         archiveType: 'zip'
         archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-uitests.zip'
-    - publish: "$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-uitests.zip"
+    - publish: $(Build.ArtifactStagingDirectory)/$(Build.BuildId)-uitests.zip
       displayName: 'Publish UI Tests Artifact'
       artifact: drop-uitests
 
@@ -205,7 +219,7 @@ stages:
         includeRootFolder: false
         archiveType: 'zip'
         archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-fakerestapi.zip'
-    - publish: "$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-fakerestapi.zip"
+    - publish: $(Build.ArtifactStagingDirectory)/$(Build.BuildId)-fakerestapi.zip
       displayName: 'Publish FakeRestAPI Artifact'
       artifact: drop-fakerestapi
 
@@ -216,10 +230,11 @@ stages:
         includeRootFolder: false
         archiveType: 'zip'
         archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-perftests.zip'
-    - publish: "$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-perftests.zip"
+    - publish: $(Build.ArtifactStagingDirectory)/$(Build.BuildId)-perftests.zip
       displayName: 'Publish Perf Tests Artifact'
       artifact: drop-perftests
 
+# =============== DEPLOY ===============
 - stage: Deploy
   dependsOn: Build
   jobs:
@@ -247,138 +262,66 @@ stages:
             artifact: drop-perftests
 
           - task: Bash@3
-            displayName: 'Warm up Web App'
-            inputs:
-              targetType: inline
-              script: |
-                set -euxo pipefail
-                APPURL="https://$(appServiceName)-$(Build.BuildId).azurewebsites.net"
-                for i in $(seq 1 40); do
-                  if curl -fsS -m 5 "$APPURL" >/dev/null; then
-                    echo "App is responding (try $i)"; exit 0; fi
-                  echo "Waiting for app (try $i) ..."
-                  sleep 5
-                done
-                echo "App did not respond in time"; exit 1
-
-          - task: Bash@3
             displayName: 'Run JMeter (Performance)'
             timeoutInMinutes: 30
             inputs:
               targetType: inline
               script: |
-                set -euxo pipefail
+                set -e
                 cd "$(Pipeline.Workspace)"
                 mkdir -p perf && cd perf
-
                 if ! command -v java >/dev/null 2>&1; then
                   if command -v apt-get >/dev/null 2>&1; then
-                    sudo apt-get update -y && sudo apt-get install -y openjdk-11-jre-headless
-                  else
+                    sudo apt-get update -y
+                    sudo apt-get install -y openjdk-11-jre-headless
+                  elif command -v yum >/dev/null 2>&1; then
                     sudo yum install -y java-11-openjdk
                   fi
                 fi
-
                 JM_VER=5.6.3
-                curl -L --fail -o apache-jmeter.tgz "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JM_VER}.tgz"
+                for i in 1 2 3 4 5; do
+                  echo "Downloading JMeter attempt $i..."
+                  curl -L --fail -o apache-jmeter.tgz "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JM_VER}.tgz" && break || sleep 5
+                done
                 tar -xzf apache-jmeter.tgz
-                JM="$(pwd)/apache-jmeter-${JM_VER}"
-
                 unzip -o "$(Pipeline.Workspace)/drop-perftests/$(Build.BuildId)-perftests.zip" -d perftests
+                JM="$(pwd)/apache-jmeter-${JM_VER}"
                 if [ -f "perftests/Starter.jmx" ]; then
                   JMX="perftests/Starter.jmx"
                 elif [ -f "perftests/PerformanceTestSuite.jmx" ]; then
                   JMX="perftests/PerformanceTestSuite.jmx"
                 else
-                  echo "JMeter JMX not found under perftests/"; ls -la perftests; exit 1
+                  echo "JMeter JMX not found under perftests/. Expected Starter.jmx" && ls -la perftests && exit 1
                 fi
-
                 APPURL="https://$(appServiceName)-$(Build.BuildId).azurewebsites.net"
-                curl -I --max-time 10 -sS "$APPURL" || true
-
-                export JVM_ARGS="-Xms256m -Xmx512m -Djava.awt.headless=true"
-                DURATION=30
-                THREADS=8
-                RAMPUP=8
+                echo "Testing against: $APPURL"
+                echo "Using JMX: $JMX"
+                DURATION=120
+                THREADS=10
+                RAMPUP=10
                 echo "Starting standalone test @ $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-
                 set +e
                 "$JM/bin/jmeter" -n -t "$JMX" \
                   -JAPPSERVICEURL="$APPURL" \
                   -JAPP_URL="$APPURL" \
                   -JBASE_URL="$APPURL" \
-                  -JTARGET_URL="$APPURL" \
-                  -Jhost="$(echo "$APPURL" | sed -E 's#https?://([^/]+)/?.*#\1#')" \
-                  -Jprotocol="$(echo "$APPURL" | sed -E 's#(https?)://.*#\1#')" \
-                  -Jport="" \
                   -JdurationSeconds="$DURATION" \
                   -Jthreads="$THREADS" \
                   -Jrampup="$RAMPUP" \
                   -Jsummariser.name=summary \
-                  -Jjmeter.save.saveservice.output_format=csv \
-                  -l perftests/results.jtl \
-                  -e -o perftests/html-report
+                  -l perftests/results.jtl
                 JM_EXIT=$?
                 set -e
-
-                SAMPLES=0
+                mkdir -p perftests/html-report
                 if [ -s perftests/results.jtl ]; then
-                  SAMPLES=$(awk -F, 'NR>1 && $1!="" {c++} END{print c+0}' perftests/results.jtl)
-                fi
-                echo "Samples counted: $SAMPLES (exit=$JM_EXIT)"
-
-                if [ "$SAMPLES" -eq 0 ]; then
-                  echo "No samples from provided JMX; generating simple smoke plan"
-                  printf '%s\n' \
-'<?xml version="1.0" encoding="UTF-8"?>' \
-'<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">' \
-'  <hashTree>' \
-'    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="SmokePlan" enabled="true">' \
-'      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments"><collectionProp name="Arguments.arguments"/></elementProp>' \
-'    </TestPlan>' \
-'    <hashTree>' \
-'      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Users" enabled="true">' \
-'        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>' \
-'        <stringProp name="ThreadGroup.num_threads">8</stringProp>' \
-'        <stringProp name="ThreadGroup.ramp_time">8</stringProp>' \
-'        <boolProp name="ThreadGroup.scheduler">false</boolProp>' \
-'        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" enabled="true">' \
-'          <boolProp name="LoopController.continue_forever">false</boolProp>' \
-'          <stringProp name="LoopController.loops">10</stringProp>' \
-'        </elementProp>' \
-'      </ThreadGroup>' \
-'      <hashTree>' \
-'        <ConfigTestElement guiclass="HttpDefaultsGui" testclass="ConfigTestElement" testname="HTTP Request Defaults" enabled="true"/>' \
-'        <hashTree/>' \
-'        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="GET /" enabled="true">' \
-'          <stringProp name="HTTPSampler.path">/</stringProp>' \
-'          <stringProp name="HTTPSampler.method">GET</stringProp>' \
-'          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>' \
-'          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>' \
-'        </HTTPSamplerProxy>' \
-'        <hashTree/>' \
-'      </hashTree>' \
-'    </hashTree>' \
-'  </hashTree>' \
-'</jmeterTestPlan>' > smoke.jmx
-
-                  PROTO=$(echo "$APPURL" | sed -E 's#(https?)://.*#\1#')
-                  HOST=$(echo "$APPURL" | sed -E 's#https?://([^/:]+).*#\1#')
-                  PORT=""
-                  "$JM/bin/jmeter" -n -t smoke.jmx \
-                    -JHTTPSampler.protocol="$PROTO" \
-                    -JHTTPSampler.domain="$HOST" \
-                    -JHTTPSampler.port="$PORT" \
-                    -Jjmeter.save.saveservice.output_format=csv \
-                    -l perftests/results.jtl \
-                    -e -o perftests/html-report
-                fi
-
-                if [ ! -f perftests/html-report/index.html ]; then
+                  "$JM/bin/jmeter" -g perftests/results.jtl -o perftests/html-report || true
+                else
                   echo "<html><body><h2>No JMeter data written to results.jtl</h2></body></html>" > perftests/html-report/index.html
                 fi
-
-                find perftests -maxdepth 2 -type f | sort
+                echo "Tree under $(pwd):"; ls -la
+                echo "Tree under perftests:"; ls -la perftests || true
+                echo "Tree under perftests/html-report:"; ls -la perftests/html-report || true
+                echo "JMeter finished with exit code: $JM_EXIT"
 
           - task: PublishPipelineArtifact@1
             displayName: 'Publish JMeter HTML Report'
@@ -396,53 +339,64 @@ stages:
 
     - task: Bash@3
       displayName: 'Run Selenium'
-      timeoutInMinutes: 12
+      timeoutInMinutes: 10
       inputs:
         targetType: 'inline'
         script: |
-          set -euxo pipefail
+          set -e
           mkdir -p "$HOME/selenium"
           unzip -o "$(Pipeline.Workspace)/drop-uitests/$(Build.BuildId)-uitests.zip" -d "$HOME/selenium"
+
+          echo "Removing any apt Chromium to avoid v85..."
           sudo apt-get update -y
           sudo apt-get purge -y chromium-browser chromium-chromedriver || true
+
+          echo "Ensure snap chromium is installed..."
           if ! command -v /snap/bin/chromium >/dev/null 2>&1; then
             sudo snap install chromium --channel=latest/stable
           fi
+
+          # انتظر ظهور chromedriver الخاص بالـsnap
           for i in 1 2 3 4 5; do
             if [ -x /snap/bin/chromium.chromedriver ]; then break; fi
             echo "Waiting for /snap/bin/chromium.chromedriver (attempt $i) ..."
             sleep 3
           done
+
           export PATH="/snap/bin:$PATH"
           export CHROME_BIN="/snap/bin/chromium"
           export CHROMEDRIVER="/snap/bin/chromium.chromedriver"
+
+          echo "Using CHROME_BIN=${CHROME_BIN}"
+          echo "Using CHROMEDRIVER=${CHROMEDRIVER}"
           "$CHROME_BIN" --version || true
           "$CHROMEDRIVER" --version || true
+
+          # تقليل مشاكل الذاكرة
           ulimit -n 4096 || true
+
+          # تحديث pip وتثبيت المتطلبات
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user -r "$HOME/selenium/requirements.txt"
+
           export DEMO_URL="https://www.saucedemo.com/"
           export DEMO_USER="standard_user"
           export DEMO_PASS="secret_sauce"
+
           mkdir -p "$HOME/selenium/logs"
-          date -u +"UTC %Y-%m-%dT%H:%M:%SZ" | tee "$HOME/selenium/logs/started_at.txt"
+          echo "=== Starting Selenium with timeout (4m) ==="
           timeout --preserve-status 4m \
             python3 "$HOME/selenium/login.py" 2>&1 | tee "$HOME/selenium/logs/selenium.out"
+
           echo "Selenium finished."
 
-    - task: PublishPipelineArtifact@1
-      displayName: 'Publish Selenium logs'
-      inputs:
-        targetPath: '$(HOME)/selenium/logs'
-        artifact: 'selenium-logs'
-
+# =============== CLEANUP ===============
 - stage: Cleanup
   displayName: 'Terraform Destroy'
   dependsOn: Deploy
   condition: always()
   jobs:
   - job: Destroy
-    displayName: 'Destroy Infra'
     pool:
       name: myAgentPool
     steps:
@@ -456,7 +410,7 @@ stages:
       inputs:
         targetType: inline
         script: |
-          set -euxo pipefail
+          set -e
           rm -rf "$(System.DefaultWorkingDirectory)/terraform/environments/test/.terraform"
 
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
