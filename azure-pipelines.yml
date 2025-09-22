@@ -1,5 +1,4 @@
 name: Azure Pipelines
-
 trigger:
 - main
 
@@ -244,6 +243,9 @@ stages:
               appType: 'webApp'
               package: '$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip'
 
+          - download: current
+            artifact: drop-perftests
+
           - task: Bash@3
             displayName: 'Warm up Web App'
             inputs:
@@ -258,9 +260,6 @@ stages:
                   sleep 5
                 done
                 echo "App did not respond in time"; exit 1
-
-          - download: current
-            artifact: drop-perftests
 
           - task: Bash@3
             displayName: 'Run JMeter (Performance)'
@@ -329,42 +328,40 @@ stages:
                 echo "Samples counted: $SAMPLES (exit=$JM_EXIT)"
 
                 if [ "$SAMPLES" -eq 0 ]; then
-                  echo "No samples from provided JMX; running fallback smoke test..."
-                  cat > smoke.jmx <<'XML'
-<?xml version="1.0" encoding="UTF-8"?>
-<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
-  <hashTree>
-    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="SmokePlan" enabled="true">
-      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments">
-        <collectionProp name="Arguments.arguments"/>
-      </elementProp>
-    </TestPlan>
-    <hashTree>
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Users" enabled="true">
-        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
-        <stringProp name="ThreadGroup.num_threads">8</stringProp>
-        <stringProp name="ThreadGroup.ramp_time">8</stringProp>
-        <boolProp name="ThreadGroup.scheduler">false</boolProp>
-        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" enabled="true">
-          <boolProp name="LoopController.continue_forever">false</boolProp>
-          <stringProp name="LoopController.loops">10</stringProp>
-        </elementProp>
-      </ThreadGroup>
-      <hashTree>
-        <ConfigTestElement guiclass="HttpDefaultsGui" testclass="ConfigTestElement" testname="HTTP Request Defaults" enabled="true"/>
-        <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="GET /" enabled="true">
-          <stringProp name="HTTPSampler.path">/</stringProp>
-          <stringProp name="HTTPSampler.method">GET</stringProp>
-          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
-          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
-        </HTTPSamplerProxy>
-        <hashTree/>
-      </hashTree>
-    </hashTree>
-  </hashTree>
-</jmeterTestPlan>
-XML
+                  echo "No samples from provided JMX; generating simple smoke plan"
+                  printf '%s\n' \
+'<?xml version="1.0" encoding="UTF-8"?>' \
+'<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">' \
+'  <hashTree>' \
+'    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="SmokePlan" enabled="true">' \
+'      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments"><collectionProp name="Arguments.arguments"/></elementProp>' \
+'    </TestPlan>' \
+'    <hashTree>' \
+'      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Users" enabled="true">' \
+'        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>' \
+'        <stringProp name="ThreadGroup.num_threads">8</stringProp>' \
+'        <stringProp name="ThreadGroup.ramp_time">8</stringProp>' \
+'        <boolProp name="ThreadGroup.scheduler">false</boolProp>' \
+'        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" enabled="true">' \
+'          <boolProp name="LoopController.continue_forever">false</boolProp>' \
+'          <stringProp name="LoopController.loops">10</stringProp>' \
+'        </elementProp>' \
+'      </ThreadGroup>' \
+'      <hashTree>' \
+'        <ConfigTestElement guiclass="HttpDefaultsGui" testclass="ConfigTestElement" testname="HTTP Request Defaults" enabled="true"/>' \
+'        <hashTree/>' \
+'        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="GET /" enabled="true">' \
+'          <stringProp name="HTTPSampler.path">/</stringProp>' \
+'          <stringProp name="HTTPSampler.method">GET</stringProp>' \
+'          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>' \
+'          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>' \
+'        </HTTPSamplerProxy>' \
+'        <hashTree/>' \
+'      </hashTree>' \
+'    </hashTree>' \
+'  </hashTree>' \
+'</jmeterTestPlan>' > smoke.jmx
+
                   PROTO=$(echo "$APPURL" | sed -E 's#(https?)://.*#\1#')
                   HOST=$(echo "$APPURL" | sed -E 's#https?://([^/:]+).*#\1#')
                   PORT=""
