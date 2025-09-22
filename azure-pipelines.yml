@@ -139,7 +139,6 @@ stages:
         targetType: inline
         script: |
           set -e
-          # detect and install only missing tools
           NEED_PKGS=""
           command -v zip     >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS zip"
           command -v unzip   >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS unzip"
@@ -504,46 +503,75 @@ stages:
 
           echo "Selenium finished."
 
-    # -------- NEW: Ship Selenium logs to Log Analytics (test ping) --------
+    # -------- Ship Selenium logs to Log Analytics (improved) --------
     - task: Bash@3
       displayName: 'Ship Selenium logs to Log Analytics (test ping)'
       env:
-        LAW_ID: $(logAnalytics.workspaceId)
-        LAW_KEY: $(logAnalytics.sharedKey)
+        LAW_ID: $(logAnalytics.workspaceId)   # أضف كـ secret
+        LAW_KEY: $(logAnalytics.sharedKey)    # أضف كـ secret
+        DIAG: "1"
       inputs:
         targetType: inline
         script: |
           set -euo pipefail
-          LOGTYPE="selenium_logs"
-          BODY='[{"message":"hello from CI","level":"info","source":"pipeline","when":"'"$(date -u +%FT%TZ)"'"}]'
-          rfc1123date="$(LC_ALL=C date -u +"%a, %d %b %Y %H:%M:%S GMT")"
-          content_length=$(printf "%s" "$BODY" | wc -c | tr -d " ")
-          string_to_sign="POST\n${content_length}\napplication/json\nx-ms-date:${rfc1123date}\n/api/logs"
-          decoded_key=$(printf "%s" "$LAW_KEY" | base64 -d 2>/dev/null || echo "BAD_KEY")
-          if [ "$decoded_key" = "BAD_KEY" ]; then
-            echo "ERROR: sharedKey is not a valid base64. Check logAnalytics.sharedKey" >&2
+          LOGTYPE="SeleniumLogs"
+          BODY_JSON='[{"message":"hello from CI","level":"info","source":"pipeline","when":"'"$(date -u +%FT%TZ)"'"}]'
+          CONTENT_TYPE="application/json"
+          RFC_DATE="$(LC_ALL=C date -u +"%a, %d %b %Y %H:%M:%S GMT")"
+          RESOURCE="/api/logs"
+          URL="https://${LAW_ID}.ods.opinsights.azure.com${RESOURCE}?api-version=2016-04-01"
+
+          CONTENT_LEN=$(printf "%s" "$BODY_JSON" | wc -c | tr -d ' ')
+          if [ -n "${DIAG:-}" ]; then
+            echo "Content-Length(bytes) = $CONTENT_LEN"
+          fi
+
+          STRING_TO_SIGN="POST\n${CONTENT_LEN}\n${CONTENT_TYPE}\nx-ms-date:${RFC_DATE}\n${RESOURCE}"
+          if [ -n "${DIAG:-}" ]; then
+            echo "StringToSign>>>"
+            printf "%s\n" "$STRING_TO_SIGN"
+            echo "<<<StringToSign"
+          fi
+
+          if ! DECODED_KEY="$(printf "%s" "$LAW_KEY" | base64 -d 2>/dev/null)"; then
+            echo "ERROR: logAnalytics.sharedKey is not valid base64" >&2
             exit 1
           fi
-          signature=$(printf "%s" "$string_to_sign" | \
-            openssl dgst -sha256 -mac HMAC -macopt key:"$decoded_key" -binary | base64)
-          auth="SharedKey ${LAW_ID}:${signature}"
-          url="https://${LAW_ID}.ods.opinsights.azure.com/api/logs?api-version=2016-04-01"
+
+          SIGNATURE=$(printf "%s" "$STRING_TO_SIGN" \
+            | iconv -t UTF-8 \
+            | openssl dgst -sha256 -binary -hmac "$DECODED_KEY" \
+            | base64)
+
+          AUTH_HEADER="SharedKey ${LAW_ID}:${SIGNATURE}"
+          if [ -n "${DIAG:-}" ]; then
+            echo "Auth header prefix = SharedKey ${LAW_ID}:<signature>"
+          fi
 
           echo "Posting 1 test record to ${LOGTYPE}_CL ..."
-          http_code=$(curl -sS -o /tmp/la.out -w "%{http_code}" -X POST "$url" \
-            -H "Content-Type: application/json" \
+          HTTP_CODE=$(curl -sS -o /tmp/la.out -w "%{http_code}" -X POST "$URL" \
+            -H "Content-Type: ${CONTENT_TYPE}" \
             -H "Log-Type: ${LOGTYPE}" \
-            -H "x-ms-date: ${rfc1123date}" \
-            -H "Authorization: ${auth}" \
+            -H "x-ms-date: ${RFC_DATE}" \
+            -H "Authorization: ${AUTH_HEADER}" \
             -H "time-generated-field: when" \
-            --data-binary "$BODY")
-          echo "Status: $http_code"
+            --data-binary "$BODY_JSON")
+
+          echo "Status: $HTTP_CODE"
           echo "Response:"; cat /tmp/la.out || true
-          case "$http_code" in
+
+          case "$HTTP_CODE" in
             200|202) echo "OK";;
-            *) echo "ERROR $http_code" >&2; exit 1;;
+            403)
+              echo "HINT: 403 InvalidAuthorization"
+              echo "- تأكد أن Workspace ID (Customer ID) صحيح وبدون فراغات."
+              echo "- تأكد من Primary Key (انسخها كـ secret بدون أسطر جديدة)."
+              exit 1;;
+            *)
+              echo "ERROR $HTTP_CODE" >&2
+              exit 1;;
           esac
-    # ---------------------------------------------------------------------
+    # -----------------------------------------------------------------
 
 # =============== CLEANUP ===============
 - stage: Cleanup
