@@ -504,6 +504,47 @@ stages:
 
           echo "Selenium finished."
 
+    # -------- NEW: Ship Selenium logs to Log Analytics (test ping) --------
+    - task: Bash@3
+      displayName: 'Ship Selenium logs to Log Analytics (test ping)'
+      env:
+        LAW_ID: $(logAnalytics.workspaceId)
+        LAW_KEY: $(logAnalytics.sharedKey)
+      inputs:
+        targetType: inline
+        script: |
+          set -euo pipefail
+          LOGTYPE="selenium_logs"
+          BODY='[{"message":"hello from CI","level":"info","source":"pipeline","when":"'"$(date -u +%FT%TZ)"'"}]'
+          rfc1123date="$(LC_ALL=C date -u +"%a, %d %b %Y %H:%M:%S GMT")"
+          content_length=$(printf "%s" "$BODY" | wc -c | tr -d " ")
+          string_to_sign="POST\n${content_length}\napplication/json\nx-ms-date:${rfc1123date}\n/api/logs"
+          decoded_key=$(printf "%s" "$LAW_KEY" | base64 -d 2>/dev/null || echo "BAD_KEY")
+          if [ "$decoded_key" = "BAD_KEY" ]; then
+            echo "ERROR: sharedKey is not a valid base64. Check logAnalytics.sharedKey" >&2
+            exit 1
+          fi
+          signature=$(printf "%s" "$string_to_sign" | \
+            openssl dgst -sha256 -mac HMAC -macopt key:"$decoded_key" -binary | base64)
+          auth="SharedKey ${LAW_ID}:${signature}"
+          url="https://${LAW_ID}.ods.opinsights.azure.com/api/logs?api-version=2016-04-01"
+
+          echo "Posting 1 test record to ${LOGTYPE}_CL ..."
+          http_code=$(curl -sS -o /tmp/la.out -w "%{http_code}" -X POST "$url" \
+            -H "Content-Type: application/json" \
+            -H "Log-Type: ${LOGTYPE}" \
+            -H "x-ms-date: ${rfc1123date}" \
+            -H "Authorization: ${auth}" \
+            -H "time-generated-field: when" \
+            --data-binary "$BODY")
+          echo "Status: $http_code"
+          echo "Response:"; cat /tmp/la.out || true
+          case "$http_code" in
+            200|202) echo "OK";;
+            *) echo "ERROR $http_code" >&2; exit 1;;
+          esac
+    # ---------------------------------------------------------------------
+
 # =============== CLEANUP ===============
 - stage: Cleanup
   displayName: 'Terraform Destroy'
