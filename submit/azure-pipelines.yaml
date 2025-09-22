@@ -1,0 +1,437 @@
+name: Azure Pipelines
+
+trigger:
+- main
+
+pool:
+  name: myAgentPool
+
+variables:
+  python.version: '3.7.6'
+  azureServiceConnectionId: 'udacity-az-sp'
+  projectRoot: $(System.DefaultWorkingDirectory)
+  environmentName: 'test'
+  resourceGroup: 'Azuredevops'
+  appServiceName: 'myapp-AppService'
+
+stages:
+# =============== BUILD ===============
+- stage: Build
+  jobs:
+  - job: BuildInfrastructure
+    displayName: 'Terraform + Postman + Package'
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Show Azure account'
+      inputs:
+        azureSubscription: '$(azureServiceConnectionId)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: az account show
+
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
+      displayName: 'Terraform installation'
+      inputs:
+        terraformVersion: '1.13.1'
+
+    - task: Bash@3
+      displayName: 'Clean .terraform (ensure re-init)'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+          rm -rf "$(System.DefaultWorkingDirectory)/terraform/environments/test/.terraform"
+
+    - task: Bash@3
+      displayName: 'Debug: list terraform folder and modules'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+          echo "---- env test ----"
+          ls -la "$(System.DefaultWorkingDirectory)/terraform/environments/test"
+          echo "---- modules/appservice ----"
+          ls -la "$(System.DefaultWorkingDirectory)/terraform/modules/appservice" || true
+          echo "---- modules/network ----"
+          ls -la "$(System.DefaultWorkingDirectory)/terraform/modules/network" || true
+          echo "---- terraform.tfvars ----"
+          sed -n '1,200p' "$(System.DefaultWorkingDirectory)/terraform/environments/test/terraform.tfvars"
+
+    - task: AzureCLI@2
+      displayName: 'Ensure backend storage exists'
+      inputs:
+        azureSubscription: '$(azureServiceConnectionId)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -e
+          RG="$(resourceGroup)"
+          LOC="westus3"
+          SA="tfstatebootstrap01"
+          echo "Ensure SA=$SA RG=$RG LOC=$LOC"
+          if ! az storage account show -g "$RG" -n "$SA" >/dev/null 2>&1; then
+            az storage account create -g "$RG" -n "$SA" -l "$LOC" --sku Standard_LRS
+          fi
+          KEY=$(az storage account keys list -g "$RG" -n "$SA" --query "[0].value" -o tsv)
+          az storage container create --name tfstate --account-name "$SA" --auth-mode key --account-key "$KEY" >/dev/null
+          echo "Backend ready."
+
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+      displayName: 'Terraform init'
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        backendServiceArm: '$(azureServiceConnectionId)'
+        backendAzureRmResourceGroupName: '$(resourceGroup)'
+        backendAzureRmStorageAccountName: 'tfstatebootstrap01'
+        backendAzureRmContainerName: 'tfstate'
+        backendAzureRmKey: 'test.terraform.tfstate'
+        backendAzureRmUseOidc: false
+        backendAzureRmUseMsi: false
+
+    - task: AzureCLI@2
+      displayName: 'TF import existing resources into state (one-time)'
+      inputs:
+        azureSubscription: '$(azureServiceConnectionId)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -e
+          cd "$(System.DefaultWorkingDirectory)/terraform/environments/test"
+          terraform import -input=false 'module.network.azurerm_virtual_network.vnet' \
+            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Network/virtualNetworks/vnet-test' || true
+          terraform import -input=false 'module.network.azurerm_subnet.subnet_test' \
+            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Network/virtualNetworks/vnet-test/subnets/subnet-test' || true
+          terraform import -input=false 'module.appservice.azurerm_service_plan.plan' \
+            '/subscriptions/538cf8ed-3aac-4da8-84f9-3bc3a7a6869b/resourceGroups/Azuredevops/providers/Microsoft.Web/serverFarms/myapp-plan' || true
+          terraform state list || true
+
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+      displayName: 'Terraform validate'
+      inputs:
+        provider: 'azurerm'
+        command: 'validate'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
+
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+      displayName: 'Terraform plan'
+      inputs:
+        provider: 'azurerm'
+        command: 'plan'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        commandOptions: '-out=tfplan -var="app_service_name=$(appServiceName)-$(Build.BuildId)"'
+        environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
+
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+      displayName: 'Terraform apply'
+      inputs:
+        provider: 'azurerm'
+        command: 'apply'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        commandOptions: '-auto-approve -var="app_service_name=$(appServiceName)-$(Build.BuildId)"'
+        environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
+
+    - task: Bash@3
+      displayName: 'Install CLI deps (zip, unzip, pip)'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y zip unzip python3-pip
+          elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y zip unzip python3-pip
+          else
+            echo "Unknown package manager; please install zip/unzip manually" >&2
+            exit 1
+          fi
+
+    - task: NodeTool@0
+      displayName: 'Use Node.js 18.x'
+      inputs:
+        versionSpec: '18.x'
+
+    - task: CmdLine@2
+      displayName: 'Install Newman'
+      inputs:
+        script: 'npm install -g newman'
+        workingDirectory: $(System.DefaultWorkingDirectory)
+
+    - task: Bash@3
+      displayName: 'Prepare Postman results folder'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+          mkdir -p '$(Build.SourcesDirectory)/automatedtesting/postman/results'
+          rm -f   '$(Build.SourcesDirectory)/automatedtesting/postman/results/'*.xml
+
+    - task: CmdLine@2
+      displayName: 'Run Data Validation Tests'
+      continueOnError: true
+      inputs:
+        script: |
+          newman run TestSuite.Data-Validation.json \
+                 -e Test.environment.json \
+                 --reporters cli,junit \
+                 --reporter-junit-export "$(Build.SourcesDirectory)/automatedtesting/postman/results/TEST-DataValidation.xml" || true
+        workingDirectory: '$(Build.SourcesDirectory)/automatedtesting/postman'
+
+    - task: CmdLine@2
+      displayName: 'Run Regression Tests'
+      continueOnError: true
+      inputs:
+        script: |
+          newman run TestSuite.Regression.json \
+                 -e Test.environment.json \
+                 --reporters cli,junit \
+                 --reporter-junit-export "$(Build.SourcesDirectory)/automatedtesting/postman/results/TEST-Regression.xml" || true
+        workingDirectory: '$(Build.SourcesDirectory)/automatedtesting/postman'
+
+    - task: PublishTestResults@2
+      displayName: 'Publish Postman JUnit Results'
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '*.xml'
+        searchFolder: '$(Build.SourcesDirectory)/automatedtesting/postman/results'
+        mergeTestResults: true
+        testRunTitle: 'Postman Results'
+        failTaskOnFailedTests: false
+
+    - task: ArchiveFiles@2
+      displayName: 'Archive UI Tests (Selenium)'
+      inputs:
+        rootFolderOrFile: '$(System.DefaultWorkingDirectory)/automatedtesting/selenium'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-uitests.zip'
+    - publish: $(Build.ArtifactStagingDirectory)/$(Build.BuildId)-uitests.zip
+      displayName: 'Publish UI Tests Artifact'
+      artifact: drop-uitests
+
+    - task: ArchiveFiles@2
+      displayName: 'Archive FakeRestAPI'
+      inputs:
+        rootFolderOrFile: '$(System.DefaultWorkingDirectory)/automatedtesting/jmeter/fakerestapi'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-fakerestapi.zip'
+    - publish: $(Build.ArtifactStagingDirectory)/$(Build.BuildId)-fakerestapi.zip
+      displayName: 'Publish FakeRestAPI Artifact'
+      artifact: drop-fakerestapi
+
+    - task: ArchiveFiles@2
+      displayName: 'Archive PerformanceTestSuite (JMeter)'
+      inputs:
+        rootFolderOrFile: '$(System.DefaultWorkingDirectory)/automatedtesting/jmeter'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-perftests.zip'
+    - publish: $(Build.ArtifactStagingDirectory)/$(Build.BuildId)-perftests.zip
+      displayName: 'Publish Perf Tests Artifact'
+      artifact: drop-perftests
+
+# =============== DEPLOY ===============
+- stage: Deploy
+  dependsOn: Build
+  jobs:
+  - deployment: FakeRestAPI
+    displayName: 'Deploy App & Run JMeter'
+    pool:
+      name: myAgentPool
+    environment: $(environmentName)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: drop-fakerestapi
+
+          - task: AzureWebApp@1
+            displayName: 'Deploy Azure Web App'
+            inputs:
+              azureSubscription: '$(azureServiceConnectionId)'
+              appName: '$(appServiceName)-$(Build.BuildId)'
+              appType: 'webApp'
+              package: '$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip'
+
+          - download: current
+            artifact: drop-perftests
+
+          - task: Bash@3
+            displayName: 'Run JMeter (Performance)'
+            timeoutInMinutes: 30
+            inputs:
+              targetType: inline
+              script: |
+                set -e
+                cd "$(Pipeline.Workspace)"
+                mkdir -p perf && cd perf
+                if ! command -v java >/dev/null 2>&1; then
+                  if command -v apt-get >/dev/null 2>&1; then
+                    sudo apt-get update -y
+                    sudo apt-get install -y openjdk-11-jre-headless
+                  elif command -v yum >/dev/null 2>&1; then
+                    sudo yum install -y java-11-openjdk
+                  fi
+                fi
+                JM_VER=5.6.3
+                for i in 1 2 3 4 5; do
+                  echo "Downloading JMeter attempt $i..."
+                  curl -L --fail -o apache-jmeter.tgz "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JM_VER}.tgz" && break || sleep 5
+                done
+                tar -xzf apache-jmeter.tgz
+                unzip -o "$(Pipeline.Workspace)/drop-perftests/$(Build.BuildId)-perftests.zip" -d perftests
+                JM="$(pwd)/apache-jmeter-${JM_VER}"
+                if [ -f "perftests/Starter.jmx" ]; then
+                  JMX="perftests/Starter.jmx"
+                elif [ -f "perftests/PerformanceTestSuite.jmx" ]; then
+                  JMX="perftests/PerformanceTestSuite.jmx"
+                else
+                  echo "JMeter JMX not found under perftests/. Expected Starter.jmx" && ls -la perftests && exit 1
+                fi
+                APPURL="https://$(appServiceName)-$(Build.BuildId).azurewebsites.net"
+                echo "Testing against: $APPURL"
+                echo "Using JMX: $JMX"
+                DURATION=120
+                THREADS=10
+                RAMPUP=10
+                echo "Starting standalone test @ $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+                set +e
+                "$JM/bin/jmeter" -n -t "$JMX" \
+                  -JAPPSERVICEURL="$APPURL" \
+                  -JAPP_URL="$APPURL" \
+                  -JBASE_URL="$APPURL" \
+                  -JdurationSeconds="$DURATION" \
+                  -Jthreads="$THREADS" \
+                  -Jrampup="$RAMPUP" \
+                  -Jsummariser.name=summary \
+                  -l perftests/results.jtl
+                JM_EXIT=$?
+                set -e
+                mkdir -p perftests/html-report
+                if [ -s perftests/results.jtl ]; then
+                  "$JM/bin/jmeter" -g perftests/results.jtl -o perftests/html-report || true
+                else
+                  echo "<html><body><h2>No JMeter data written to results.jtl</h2></body></html>" > perftests/html-report/index.html
+                fi
+                echo "Tree under $(pwd):"; ls -la
+                echo "Tree under perftests:"; ls -la perftests || true
+                echo "Tree under perftests/html-report:"; ls -la perftests/html-report || true
+                echo "JMeter finished with exit code: $JM_EXIT"
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish JMeter HTML Report'
+            inputs:
+              targetPath: '$(Pipeline.Workspace)/perf/perftests/html-report'
+              artifact: 'jmeter-report'
+
+  - job: SeleniumUITests
+    displayName: 'Selenium UI Tests'
+    pool:
+      name: myAgentPool
+    steps:
+    - download: current
+      artifact: drop-uitests
+
+    - task: Bash@3
+      displayName: 'Run Selenium'
+      timeoutInMinutes: 10
+      inputs:
+        targetType: 'inline'
+        script: |
+          set -e
+          mkdir -p "$HOME/selenium"
+          unzip -o "$(Pipeline.Workspace)/drop-uitests/$(Build.BuildId)-uitests.zip" -d "$HOME/selenium"
+
+          echo "Removing any apt Chromium to avoid v85..."
+          sudo apt-get update -y
+          sudo apt-get purge -y chromium-browser chromium-chromedriver || true
+
+          echo "Ensure snap chromium is installed..."
+          if ! command -v /snap/bin/chromium >/dev/null 2>&1; then
+            sudo snap install chromium --channel=latest/stable
+          fi
+
+          # انتظر ظهور chromedriver الخاص بالـsnap
+          for i in 1 2 3 4 5; do
+            if [ -x /snap/bin/chromium.chromedriver ]; then break; fi
+            echo "Waiting for /snap/bin/chromium.chromedriver (attempt $i) ..."
+            sleep 3
+          done
+
+          export PATH="/snap/bin:$PATH"
+          export CHROME_BIN="/snap/bin/chromium"
+          export CHROMEDRIVER="/snap/bin/chromium.chromedriver"
+
+          echo "Using CHROME_BIN=${CHROME_BIN}"
+          echo "Using CHROMEDRIVER=${CHROMEDRIVER}"
+          "$CHROME_BIN" --version || true
+          "$CHROMEDRIVER" --version || true
+
+          # تقليل مشاكل الذاكرة
+          ulimit -n 4096 || true
+
+          # تحديث pip وتثبيت المتطلبات
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user -r "$HOME/selenium/requirements.txt"
+
+          export DEMO_URL="https://www.saucedemo.com/"
+          export DEMO_USER="standard_user"
+          export DEMO_PASS="secret_sauce"
+
+          mkdir -p "$HOME/selenium/logs"
+          echo "=== Starting Selenium with timeout (4m) ==="
+          timeout --preserve-status 4m \
+            python3 "$HOME/selenium/login.py" 2>&1 | tee "$HOME/selenium/logs/selenium.out"
+
+          echo "Selenium finished."
+
+# =============== CLEANUP ===============
+- stage: Cleanup
+  displayName: 'Terraform Destroy'
+  dependsOn: Deploy
+  condition: always()
+  jobs:
+  - job: Destroy
+    pool:
+      name: myAgentPool
+    steps:
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
+      displayName: 'Terraform installation (Cleanup)'
+      inputs:
+        terraformVersion: '1.13.1'
+
+    - task: Bash@3
+      displayName: 'Clean .terraform (Cleanup)'
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+          rm -rf "$(System.DefaultWorkingDirectory)/terraform/environments/test/.terraform"
+
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+      displayName: 'Terraform init (Cleanup)'
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        backendServiceArm: '$(azureServiceConnectionId)'
+        backendAzureRmResourceGroupName: '$(resourceGroup)'
+        backendAzureRmStorageAccountName: 'tfstatebootstrap01'
+        backendAzureRmContainerName: 'tfstate'
+        backendAzureRmKey: 'test.terraform.tfstate'
+        backendAzureRmUseOidc: false
+        backendAzureRmUseMsi: false
+
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
+      displayName: 'Terraform destroy'
+      inputs:
+        provider: 'azurerm'
+        command: 'destroy'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
+        commandOptions: '-auto-approve -var="app_service_name=$(appServiceName)-$(Build.BuildId)"'
+        environmentServiceNameAzureRM: '$(azureServiceConnectionId)'

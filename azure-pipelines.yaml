@@ -15,7 +15,6 @@ variables:
   appServiceName: 'myapp-AppService'
 
 stages:
-# =============== BUILD ===============
 - stage: Build
   jobs:
   - job: BuildInfrastructure
@@ -46,7 +45,7 @@ stages:
           rm -rf "$(System.DefaultWorkingDirectory)/terraform/environments/test/.terraform"
 
     - task: Bash@3
-      displayName: 'Debug: list terraform folder and modules'
+      displayName: 'Debug: list terraform folders'
       inputs:
         targetType: inline
         script: |
@@ -146,7 +145,7 @@ stages:
       displayName: 'Install Newman'
       inputs:
         script: 'npm install -g newman'
-        workingDirectory: '$(System.DefaultWorkingDirectory)'
+        workingDirectory: $(System.DefaultWorkingDirectory)
 
     - task: Bash@3
       displayName: 'Prepare Postman results folder'
@@ -222,7 +221,6 @@ stages:
       displayName: 'Publish Perf Tests Artifact'
       artifact: drop-perftests
 
-# =============== DEPLOY ===============
 - stage: Deploy
   dependsOn: Build
   jobs:
@@ -441,13 +439,13 @@ XML
         targetPath: '$(HOME)/selenium/logs'
         artifact: 'selenium-logs'
 
-# =============== CLEANUP ===============
 - stage: Cleanup
   displayName: 'Terraform Destroy'
   dependsOn: Deploy
   condition: always()
   jobs:
   - job: Destroy
+    displayName: 'Destroy Infra'
     pool:
       name: myAgentPool
     steps:
