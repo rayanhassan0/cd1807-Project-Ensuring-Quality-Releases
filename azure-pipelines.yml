@@ -255,7 +255,6 @@ stages:
           tar -xzf apache-jmeter.tgz
           rm -f apache-jmeter.tgz
           ls -la
-
     - publish: $(Build.ArtifactStagingDirectory)/jmeter
       displayName: 'Publish JMeter binary artifact'
       artifact: jmeter-bin
@@ -451,70 +450,6 @@ stages:
             python3 "$HOME/selenium/login.py" 2>&1 | tee "$HOME/selenium/logs/selenium.out"
 
           echo "Selenium finished."
-
-    - task: Bash@3
-      displayName: 'Ship Selenium log to Log Analytics (Custom Log)'
-      env:
-        LAW_ID: $(logAnalytics.workspaceId)
-        LAW_KEY: $(logAnalytics.sharedKey)
-      inputs:
-        targetType: inline
-        script: |
-          set -e
-          LOGFILE="$HOME/selenium/logs/selenium.out"
-          if [ ! -s "$LOGFILE" ]; then
-            echo "Selenium log not found or empty: $LOGFILE"
-            exit 0
-          fi
-
-          BUILD_ID="$(Build.BuildId)"
-          JOB_NAME="SeleniumUITests"
-          HOSTNAME="$(hostname)"
-          NOW_ISO="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-
-          TMPJSON="$(mktemp)"
-          echo "[" > "$TMPJSON"
-          i=0
-          while IFS= read -r line || [ -n "$line" ]; do
-            esc=$(printf '%s' "$line" | python3 - << 'PY'
-import json,sys
-print(json.dumps(sys.stdin.read())[1:-1])
-PY
-)
-            [ $i -gt 0 ] && echo -n "," >> "$TMPJSON"
-            printf '{"time":"%s","BuildId_s":"%s","Job_s":"%s","Host_s":"%s","Line_s":"%s"}' \
-              "$NOW_ISO" "$BUILD_ID" "$JOB_NAME" "$HOSTNAME" "$esc" >> "$TMPJSON"
-            i=$((i+1))
-          done < "$LOGFILE"
-          echo "]" >> "$TMPJSON"
-
-          LAW_ID="${LAW_ID:?Missing workspaceId}"
-          LAW_KEY="${LAW_KEY:?Missing sharedKey}"
-          LOGTYPE="selenium_logs"  # table selenium_logs_CL
-
-          body="$(cat "$TMPJSON")"
-          contentLength=$(printf '%s' "$body" | wc -c | tr -d ' ')
-          rfc1123date=$(LC_ALL=C date -u +"%a, %d %b %Y %H:%M:%S GMT")
-          stringToSign="POST\n${contentLength}\napplication/json\nx-ms-date:${rfc1123date}\n/api/logs"
-
-          SIG=$(python3 - "$LAW_KEY" "$stringToSign" << 'PY'
-import sys, base64, hmac, hashlib
-key = base64.b64decode(sys.argv[1])
-msg = sys.argv[2].encode('utf-8')
-print(base64.b64encode(hmac.new(key, msg, hashlib.sha256).digest()).decode())
-PY
-)
-          AUTH="SharedKey ${LAW_ID}:${SIG}"
-
-          echo "Sending $i lines from $LOGFILE to ${LOGTYPE}_CL ..."
-          curl -sS -D - \
-            "https://${LAW_ID}.ods.opinsights.azure.com/api/logs?api-version=2016-04-01" \
-            -H "Content-Type: application/json" \
-            -H "Log-Type: ${LOGTYPE}" \
-            -H "x-ms-date: ${rfc1123date}" \
-            -H "Authorization: ${AUTH}" \
-            -H "time-generated-field: time" \
-            --data-binary @"$TMPJSON" | sed -n '1,30p'
 
 # =============== CLEANUP ===============
 - stage: Cleanup
