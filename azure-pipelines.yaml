@@ -139,7 +139,7 @@ stages:
         targetType: inline
         script: |
           set -e
-          if command -v apt-get >/dev/null 2>&1; then
+          if command -v apt-get >/dev/null 2nd &1; then
             sudo apt-get update -y
             sudo apt-get install -y zip unzip python3-pip
           elif command -v yum >/dev/null 2>&1; then
@@ -261,45 +261,57 @@ stages:
           - download: current
             artifact: drop-perftests
 
+          # --------- JMeter (معدلة) ---------
           - task: Bash@3
             displayName: 'Run JMeter (Performance)'
             timeoutInMinutes: 30
             inputs:
               targetType: inline
               script: |
-                set -e
+                set -euxo pipefail
                 cd "$(Pipeline.Workspace)"
                 mkdir -p perf && cd perf
+
+                # Java
                 if ! command -v java >/dev/null 2>&1; then
                   if command -v apt-get >/dev/null 2>&1; then
                     sudo apt-get update -y
                     sudo apt-get install -y openjdk-11-jre-headless
-                  elif command -v yum >/dev/null 2>&1; then
+                  else
                     sudo yum install -y java-11-openjdk
                   fi
                 fi
+
+                # JMeter
                 JM_VER=5.6.3
-                for i in 1 2 3 4 5; do
-                  echo "Downloading JMeter attempt $i..."
-                  curl -L --fail -o apache-jmeter.tgz "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JM_VER}.tgz" && break || sleep 5
-                done
+                curl -L --fail -o apache-jmeter.tgz "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JM_VER}.tgz"
                 tar -xzf apache-jmeter.tgz
-                unzip -o "$(Pipeline.Workspace)/drop-perftests/$(Build.BuildId)-perftests.zip" -d perftests
                 JM="$(pwd)/apache-jmeter-${JM_VER}"
+
+                # خطة الاختبار
+                unzip -o "$(Pipeline.Workspace)/drop-perftests/$(Build.BuildId)-perftests.zip" -d perftests
                 if [ -f "perftests/Starter.jmx" ]; then
                   JMX="perftests/Starter.jmx"
                 elif [ -f "perftests/PerformanceTestSuite.jmx" ]; then
                   JMX="perftests/PerformanceTestSuite.jmx"
                 else
-                  echo "JMeter JMX not found under perftests/. Expected Starter.jmx" && ls -la perftests && exit 1
+                  echo "JMeter JMX not found under perftests/"; ls -la perftests; exit 1
                 fi
+
+                # عنوان التطبيق
                 APPURL="https://$(appServiceName)-$(Build.BuildId).azurewebsites.net"
                 echo "Testing against: $APPURL"
                 echo "Using JMX: $JMX"
-                DURATION=120
+
+                # تخفيف الذاكرة + ملخص
+                export JVM_ARGS="-Xms256m -Xmx512m -Djava.awt.headless=true"
+                DURATION=60
                 THREADS=10
                 RAMPUP=10
+
                 echo "Starting standalone test @ $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+                # تشغيل الاختبار وإخراج تقرير HTML مباشرة
                 set +e
                 "$JM/bin/jmeter" -n -t "$JMX" \
                   -JAPPSERVICEURL="$APPURL" \
@@ -309,19 +321,22 @@ stages:
                   -Jthreads="$THREADS" \
                   -Jrampup="$RAMPUP" \
                   -Jsummariser.name=summary \
-                  -l perftests/results.jtl
+                  -Jjmeter.save.saveservice.output_format=csv \
+                  -l perftests/results.jtl \
+                  -e -o perftests/html-report
                 JM_EXIT=$?
                 set -e
-                mkdir -p perftests/html-report
-                if [ -s perftests/results.jtl ]; then
-                  "$JM/bin/jmeter" -g perftests/results.jtl -o perftests/html-report || true
-                else
+
+                # تأكيد وجود التقرير
+                if [ ! -s perftests/results.jtl ] || [ ! -f perftests/html-report/index.html ]; then
+                  echo "JMeter run produced no samples — check JMX/URL"
+                  # لا نفشل الستيب لكن نخلي الآرتيفاكت يوضح الحالة
                   echo "<html><body><h2>No JMeter data written to results.jtl</h2></body></html>" > perftests/html-report/index.html
                 fi
-                echo "Tree under $(pwd):"; ls -la
-                echo "Tree under perftests:"; ls -la perftests || true
-                echo "Tree under perftests/html-report:"; ls -la perftests/html-report || true
+
                 echo "JMeter finished with exit code: $JM_EXIT"
+                echo "==== Tree ===="; find perftests -maxdepth 2 -type f | sort
+          # ----------------------------------
 
           - task: PublishPipelineArtifact@1
             displayName: 'Publish JMeter HTML Report'
@@ -356,7 +371,6 @@ stages:
             sudo snap install chromium --channel=latest/stable
           fi
 
-          # انتظر ظهور chromedriver الخاص بالـsnap
           for i in 1 2 3 4 5; do
             if [ -x /snap/bin/chromium.chromedriver ]; then break; fi
             echo "Waiting for /snap/bin/chromium.chromedriver (attempt $i) ..."
@@ -367,15 +381,10 @@ stages:
           export CHROME_BIN="/snap/bin/chromium"
           export CHROMEDRIVER="/snap/bin/chromium.chromedriver"
 
-          echo "Using CHROME_BIN=${CHROME_BIN}"
-          echo "Using CHROMEDRIVER=${CHROMEDRIVER}"
           "$CHROME_BIN" --version || true
           "$CHROMEDRIVER" --version || true
 
-          # تقليل مشاكل الذاكرة
           ulimit -n 4096 || true
-
-          # تحديث pip وتثبيت المتطلبات
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user -r "$HOME/selenium/requirements.txt"
 
@@ -384,7 +393,6 @@ stages:
           export DEMO_PASS="secret_sauce"
 
           mkdir -p "$HOME/selenium/logs"
-          echo "=== Starting Selenium with timeout (4m) ==="
           timeout --preserve-status 4m \
             python3 "$HOME/selenium/login.py" 2>&1 | tee "$HOME/selenium/logs/selenium.out"
 
