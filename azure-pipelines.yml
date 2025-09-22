@@ -358,7 +358,7 @@ stages:
           - download: current
             artifact: jmeter-bin
 
-          # === NEW: Install Java and fix JMeter exec permissions ===
+          # === Install Java and ensure JMeter is executable ===
           - task: Bash@3
             displayName: 'Prep JMeter: install Java + chmod bin'
             inputs:
@@ -376,18 +376,11 @@ stages:
 
                 JM_VER=5.6.3
                 JM="$(Pipeline.Workspace)/jmeter-bin/apache-jmeter-${JM_VER}"
-                echo "Fixing exec perms under: $JM/bin"
                 chmod -R +x "$JM/bin" || true
                 find "$JM" -type f -name "*.sh" -exec chmod +x {} \; || true
 
-                echo "java -version:"
                 java -version || true
-                echo "jmeter -v:"
                 "$JM/bin/jmeter" -v || true
-
-                echo "Tree under jmeter-bin:"
-                ls -la "$(Pipeline.Workspace)/jmeter-bin" || true
-                ls -la "$JM/bin" || true
 
           - task: Bash@3
             displayName: 'Run JMeter (Performance)'
@@ -401,17 +394,7 @@ stages:
 
                 JM_VER=5.6.3
                 JM="$(Pipeline.Workspace)/jmeter-bin/apache-jmeter-${JM_VER}"
-
-                if [ ! -x "$JM/bin/jmeter" ]; then
-                  echo "JMeter launcher not executable at: $JM/bin/jmeter"
-                  ls -la "$JM/bin" || true
-                  echo "Applying chmod +x (last resort)..."
-                  chmod -R +x "$JM/bin" || true
-                fi
-                if [ ! -x "$JM/bin/jmeter" ]; then
-                  echo "Still not executable. Failing early."
-                  exit 1
-                fi
+                [ -x "$JM/bin/jmeter" ] || { echo "JMeter not executable"; chmod -R +x "$JM/bin"; }
 
                 unzip -o "$(Pipeline.Workspace)/drop-perftests/$(Build.BuildId)-perftests.zip" -d perftests
 
@@ -461,7 +444,7 @@ stages:
       displayName: 'Run Selenium'
       timeoutInMinutes: 10
       inputs:
-        targetType: inline
+        targetType: 'inline'
         script: |
           set -e
           mkdir -p "$HOME/selenium"
@@ -503,40 +486,48 @@ stages:
 
           echo "Selenium finished."
 
-    # -------- Ship Selenium logs to Log Analytics (improved) --------
+    # -------- Ship Selenium logs to Log Analytics (sanitized + diagnostics) --------
     - task: Bash@3
       displayName: 'Ship Selenium logs to Log Analytics (test ping)'
       env:
-        LAW_ID: $(logAnalytics.workspaceId)   # أضف كـ secret
-        LAW_KEY: $(logAnalytics.sharedKey)    # أضف كـ secret
+        LAW_ID: $(logAnalytics.workspaceId)   # اجعلها secret
+        LAW_KEY: $(logAnalytics.sharedKey)    # اجعلها secret
         DIAG: "1"
       inputs:
         targetType: inline
         script: |
           set -euo pipefail
+
+          # Sanitize secrets
+          LAW_ID="$(printf '%s' "${LAW_ID:-}" | tr -d ' \r\n')"
+          LAW_KEY_RAW="$(printf '%s' "${LAW_KEY:-}" | tr -d ' \r\n')"
+
+          # Validate ID shape (GUID)
+          if ! printf '%s' "$LAW_ID" | grep -Eq '^[0-9a-fA-F-]{36}$'; then
+            echo "ERROR: Workspace ID شكلُه غير صحيح (GUID مطلوب)."
+            echo "TIP: انسخ 'Workspace ID (Customer ID)' من Portal وليس Resource ID."
+            exit 1
+          fi
+
+          # Decode key (must be clean base64)
+          if ! DECODED_KEY="$(printf '%s' "$LAW_KEY_RAW" | base64 -d 2>/dev/null)"; then
+            echo "ERROR: Primary Key ليست base64 صافية (غالباً فيها مسافات/CRLF)."
+            echo "TIP: انسخ 'Primary key' من Portal → Agents management → Keys بدون أسطر جديدة."
+            exit 1
+          fi
+
           LOGTYPE="SeleniumLogs"
-          BODY_JSON='[{"message":"hello from CI","level":"info","source":"pipeline","when":"'"$(date -u +%FT%TZ)"'"}]'
           CONTENT_TYPE="application/json"
+          BODY_JSON='[{"message":"hello from CI","level":"info","source":"pipeline","when":"'"$(date -u +%FT%TZ)"'"}]'
           RFC_DATE="$(LC_ALL=C date -u +"%a, %d %b %Y %H:%M:%S GMT")"
           RESOURCE="/api/logs"
           URL="https://${LAW_ID}.ods.opinsights.azure.com${RESOURCE}?api-version=2016-04-01"
 
           CONTENT_LEN=$(printf "%s" "$BODY_JSON" | wc -c | tr -d ' ')
-          if [ -n "${DIAG:-}" ]; then
-            echo "Content-Length(bytes) = $CONTENT_LEN"
-          fi
+          [ -n "${DIAG:-}" ] && echo "Content-Length(bytes) = $CONTENT_LEN"
 
           STRING_TO_SIGN="POST\n${CONTENT_LEN}\n${CONTENT_TYPE}\nx-ms-date:${RFC_DATE}\n${RESOURCE}"
-          if [ -n "${DIAG:-}" ]; then
-            echo "StringToSign>>>"
-            printf "%s\n" "$STRING_TO_SIGN"
-            echo "<<<StringToSign"
-          fi
-
-          if ! DECODED_KEY="$(printf "%s" "$LAW_KEY" | base64 -d 2>/dev/null)"; then
-            echo "ERROR: logAnalytics.sharedKey is not valid base64" >&2
-            exit 1
-          fi
+          [ -n "${DIAG:-}" ] && { echo "StringToSign>>>"; printf "%s\n" "$STRING_TO_SIGN"; echo "<<<StringToSign"; }
 
           SIGNATURE=$(printf "%s" "$STRING_TO_SIGN" \
             | iconv -t UTF-8 \
@@ -544,9 +535,7 @@ stages:
             | base64)
 
           AUTH_HEADER="SharedKey ${LAW_ID}:${SIGNATURE}"
-          if [ -n "${DIAG:-}" ]; then
-            echo "Auth header prefix = SharedKey ${LAW_ID}:<signature>"
-          fi
+          [ -n "${DIAG:-}" ] && echo "Auth header prefix = SharedKey ${LAW_ID}:<signature>"
 
           echo "Posting 1 test record to ${LOGTYPE}_CL ..."
           HTTP_CODE=$(curl -sS -o /tmp/la.out -w "%{http_code}" -X POST "$URL" \
@@ -564,8 +553,12 @@ stages:
             200|202) echo "OK";;
             403)
               echo "HINT: 403 InvalidAuthorization"
-              echo "- تأكد أن Workspace ID (Customer ID) صحيح وبدون فراغات."
-              echo "- تأكد من Primary Key (انسخها كـ secret بدون أسطر جديدة)."
+              echo "- Workspace ID = GUID صحيح"
+              echo "- Primary Key = base64 نظيفة (بدون مسافات/أسطر)"
+              echo "- جرّب Regenerate للـ Primary key لو استمر"
+              exit 1;;
+            401)
+              echo "Unauthorized (401) — تحقق من الأذونات/Endpoint."
               exit 1;;
             *)
               echo "ERROR $HTTP_CODE" >&2
