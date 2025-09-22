@@ -43,7 +43,7 @@ stages:
           rm -rf "$(System.DefaultWorkingDirectory)/terraform/environments/test/.terraform"
 
     - task: Bash@3
-      displayName: 'Debug: list terraform folder and modules'
+      displayName: 'Debug: list terraform folders'
       inputs:
         targetType: inline
         script: |
@@ -91,7 +91,7 @@ stages:
         backendAzureRmUseMsi: false
 
     - task: AzureCLI@2
-      displayName: 'TF import existing resources into state (one-time)'
+      displayName: 'TF import existing resources (one-time)'
       inputs:
         azureSubscription: '$(azureServiceConnectionId)'
         scriptType: bash
@@ -234,7 +234,7 @@ stages:
       displayName: 'Publish Perf Tests Artifact'
       artifact: drop-perftests
 
-    # ==== جهّز JMeter مرة واحدة وانشره كـ artifact ====
+    # Prepare JMeter once and publish as artifact
     - task: Bash@3
       displayName: 'Download JMeter binary (once)'
       inputs:
@@ -281,9 +281,9 @@ stages:
               ls -lh "$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
             displayName: 'Show package size'
 
-          # نشر بدون Kudu: Blob SAS + WEBSITE_RUN_FROM_PACKAGE
+          # Deploy without Kudu: WEBSITE_RUN_FROM_PACKAGE via Blob SAS
           - task: AzureCLI@2
-            displayName: 'Deploy via Run-From-Package (Blob SAS) — no Kudu'
+            displayName: 'Deploy via Run-From-Package (Blob SAS)'
             inputs:
               azureSubscription: '$(azureServiceConnectionId)'
               scriptType: bash
@@ -292,7 +292,7 @@ stages:
                 set -e
                 RG="$(resourceGroup)"
                 APP="$(appServiceName)-$(Build.BuildId)"
-                SA="tfstatebootstrap01"   # غيّره إذا لزم
+                SA="tfstatebootstrap01"
                 CN="webpackages"
                 ZIP="$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
                 BLOB="$(Build.BuildId)-fakerestapi.zip"
@@ -343,7 +343,6 @@ stages:
           - download: current
             artifact: drop-perftests
 
-          # نزّل JMeter الجاهز من مرحلة Build
           - download: current
             artifact: jmeter-bin
 
@@ -357,7 +356,6 @@ stages:
                 cd "$(Pipeline.Workspace)"
                 mkdir -p perf && cd perf
 
-                # استخدم JMeter المنشور (بدون تحميل من الإنترنت)
                 JM_VER=5.6.3
                 JM="$(Pipeline.Workspace)/jmeter-bin/apache-jmeter-${JM_VER}"
                 if [ ! -x "$JM/bin/jmeter" ]; then
@@ -371,7 +369,7 @@ stages:
                 elif [ -f "perftests/PerformanceTestSuite.jmx" ]; then
                   JMX="perftests/PerformanceTestSuite.jmx"
                 else
-                  echo "JMeter JMX not found under perftests/. Expected Starter.jmx" && ls -la perftests && exit 1
+                  echo "JMeter JMX not found under perftests/." && ls -la perftests && exit 1
                 fi
 
                 APPURL="https://$(appServiceName)-$(Build.BuildId).azurewebsites.net"
@@ -412,17 +410,15 @@ stages:
       displayName: 'Run Selenium'
       timeoutInMinutes: 10
       inputs:
-        targetType: 'inline'
+        targetType: inline
         script: |
           set -e
           mkdir -p "$HOME/selenium"
           unzip -o "$(Pipeline.Workspace)/drop-uitests/$(Build.BuildId)-uitests.zip" -d "$HOME/selenium"
 
-          echo "Removing any apt Chromium to avoid v85..."
           sudo apt-get update -y
           sudo apt-get purge -y chromium-browser chromium-chromedriver || true
 
-          echo "Ensure snap chromium is installed..."
           if ! command -v /snap/bin/chromium >/dev/null 2>&1; then
             sudo snap install chromium --channel=latest/stable
           fi
@@ -455,6 +451,70 @@ stages:
             python3 "$HOME/selenium/login.py" 2>&1 | tee "$HOME/selenium/logs/selenium.out"
 
           echo "Selenium finished."
+
+    - task: Bash@3
+      displayName: 'Ship Selenium log to Log Analytics (Custom Log)'
+      env:
+        LAW_ID: $(logAnalytics.workspaceId)
+        LAW_KEY: $(logAnalytics.sharedKey)
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+          LOGFILE="$HOME/selenium/logs/selenium.out"
+          if [ ! -s "$LOGFILE" ]; then
+            echo "Selenium log not found or empty: $LOGFILE"
+            exit 0
+          fi
+
+          BUILD_ID="$(Build.BuildId)"
+          JOB_NAME="SeleniumUITests"
+          HOSTNAME="$(hostname)"
+          NOW_ISO="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          TMPJSON="$(mktemp)"
+          echo "[" > "$TMPJSON"
+          i=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            esc=$(printf '%s' "$line" | python3 - << 'PY'
+import json,sys
+print(json.dumps(sys.stdin.read())[1:-1])
+PY
+)
+            [ $i -gt 0 ] && echo -n "," >> "$TMPJSON"
+            printf '{"time":"%s","BuildId_s":"%s","Job_s":"%s","Host_s":"%s","Line_s":"%s"}' \
+              "$NOW_ISO" "$BUILD_ID" "$JOB_NAME" "$HOSTNAME" "$esc" >> "$TMPJSON"
+            i=$((i+1))
+          done < "$LOGFILE"
+          echo "]" >> "$TMPJSON"
+
+          LAW_ID="${LAW_ID:?Missing workspaceId}"
+          LAW_KEY="${LAW_KEY:?Missing sharedKey}"
+          LOGTYPE="selenium_logs"  # table selenium_logs_CL
+
+          body="$(cat "$TMPJSON")"
+          contentLength=$(printf '%s' "$body" | wc -c | tr -d ' ')
+          rfc1123date=$(LC_ALL=C date -u +"%a, %d %b %Y %H:%M:%S GMT")
+          stringToSign="POST\n${contentLength}\napplication/json\nx-ms-date:${rfc1123date}\n/api/logs"
+
+          SIG=$(python3 - "$LAW_KEY" "$stringToSign" << 'PY'
+import sys, base64, hmac, hashlib
+key = base64.b64decode(sys.argv[1])
+msg = sys.argv[2].encode('utf-8')
+print(base64.b64encode(hmac.new(key, msg, hashlib.sha256).digest()).decode())
+PY
+)
+          AUTH="SharedKey ${LAW_ID}:${SIG}"
+
+          echo "Sending $i lines from $LOGFILE to ${LOGTYPE}_CL ..."
+          curl -sS -D - \
+            "https://${LAW_ID}.ods.opinsights.azure.com/api/logs?api-version=2016-04-01" \
+            -H "Content-Type: application/json" \
+            -H "Log-Type: ${LOGTYPE}" \
+            -H "x-ms-date: ${rfc1123date}" \
+            -H "Authorization: ${AUTH}" \
+            -H "time-generated-field: time" \
+            --data-binary @"$TMPJSON" | sed -n '1,30p'
 
 # =============== CLEANUP ===============
 - stage: Cleanup
