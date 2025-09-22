@@ -139,7 +139,7 @@ stages:
         targetType: inline
         script: |
           set -e
-          if command -v apt-get >/dev/null 2>&1; then
+          if command -v apt-get >/div/null 2>&1; then
             sudo apt-get update -y
             sudo apt-get install -y zip unzip python3-pip
           elif command -v yum >/dev/null 2>&1; then
@@ -345,6 +345,38 @@ stages:
           - download: current
             artifact: jmeter-bin
 
+          # === الإضافة الجديدة: تثبيت Java + إصلاح صلاحيات JMeter بعد تنزيل الـ artifact ===
+          - task: Bash@3
+            displayName: 'Prep JMeter: install Java + chmod bin'
+            inputs:
+              targetType: inline
+              script: |
+                set -e
+                # Ensure Java exists (JMeter requires JRE/JDK)
+                if ! command -v java >/dev/null 2>&1; then
+                  if command -v apt-get >/dev/null 2>&1; then
+                    sudo apt-get update -y
+                    sudo apt-get install -y openjdk-17-jre-headless
+                  elif command -v yum >/dev/null 2>&1; then
+                    sudo yum install -y java-17-openjdk
+                  fi
+                fi
+
+                JM_VER=5.6.3
+                JM="$(Pipeline.Workspace)/jmeter-bin/apache-jmeter-${JM_VER}"
+                echo "Fixing exec perms under: $JM/bin"
+                chmod -R +x "$JM/bin" || true
+                find "$JM" -type f -name "*.sh" -exec chmod +x {} \; || true
+
+                echo "java -version:"
+                java -version || true
+                echo "jmeter -v:"
+                "$JM/bin/jmeter" -v || true
+
+                echo "Tree under jmeter-bin:"
+                ls -la "$(Pipeline.Workspace)/jmeter-bin" || true
+                ls -la "$JM/bin" || true
+
           - task: Bash@3
             displayName: 'Run JMeter (Performance)'
             timeoutInMinutes: 30
@@ -357,8 +389,18 @@ stages:
 
                 JM_VER=5.6.3
                 JM="$(Pipeline.Workspace)/jmeter-bin/apache-jmeter-${JM_VER}"
+
+                # فحص مُحسّن مع محاولة chmod كحل أخير
                 if [ ! -x "$JM/bin/jmeter" ]; then
-                  echo "JMeter not found at $JM" && ls -la "$(Pipeline.Workspace)/jmeter-bin" && exit 1
+                  echo "JMeter launcher not executable at: $JM/bin/jmeter"
+                  echo "Listing:"
+                  ls -la "$JM/bin" || true
+                  echo "Applying chmod +x (last resort)..."
+                  chmod -R +x "$JM/bin" || true
+                fi
+                if [ ! -x "$JM/bin/jmeter" ]; then
+                  echo "Still not executable. Failing early."
+                  exit 1
                 fi
 
                 unzip -o "$(Pipeline.Workspace)/drop-perftests/$(Build.BuildId)-perftests.zip" -d perftests
