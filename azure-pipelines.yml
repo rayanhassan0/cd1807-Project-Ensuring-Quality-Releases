@@ -29,11 +29,9 @@ stages:
           mkdir -p "$HOME/selenium"
           cp -r "$SRC_DIR"/. "$HOME/selenium/" || true
 
-          # Clean old chrome processes
           pkill -f chrome || true
           pkill -f chromium || true
 
-          # Ensure chromium via snap (one-time on agent VM)
           sudo apt-get update -y
           sudo apt-get purge -y chromium-browser chromium-chromedriver || true
           if ! command -v /snap/bin/chromium >/dev/null 2>&1; then
@@ -46,17 +44,14 @@ stages:
           done
           export PATH="/snap/bin:$PATH"
 
-          # Python deps (user scope)
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user selenium==4.21.0 webdriver-manager==4.0.2
 
-          # Unique Chrome profile per build
           export CHROME_PROFILE_DIR="$HOME/selenium/profile-$BUILD_BUILDID"
           rm -rf "$CHROME_PROFILE_DIR" || true
           mkdir -p "$CHROME_PROFILE_DIR"
           sudo mkdir -p /dev/shm || true
 
-          # Minimal runner (يطبع سطر واضح للاقتباس في Log Analytics)
           cat > "$HOME/selenium/runner.py" <<'PY'
           import os, random
           from selenium import webdriver
@@ -81,7 +76,6 @@ stages:
           driver = webdriver.Chrome(ChromeDriverManager().install(), options=opts)
           driver.get(url)
           print("PAGE_TITLE=", driver.title)
-          # السطر الذي سنبحث عنه في Log Analytics:
           print("Object removed from the cart; suite=CartSuite")
           driver.quit()
           PY
@@ -90,44 +84,35 @@ stages:
           mkdir -p "$HOME/selenium/logs"
           echo "=== Starting Selenium with timeout (4m) ==="
           set +e
-          timeout --preserve-status 4m \
-            python3 "$HOME/selenium/runner.py" 2>&1 | tee "$HOME/selenium/logs/selenium.out"
+          timeout --preserve-status 4m python3 "$HOME/selenium/runner.py" 2>&1 | tee "$HOME/selenium/logs/selenium.out"
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
           echo "Selenium finished with exit code: $EXIT_CODE"
 
     - task: Bash@3
-      displayName: 'Ship Selenium log to Log Analytics (hardcoded creds)'
+      displayName: 'Ship Selenium log to Log Analytics (fixed HMAC + YAML-safe)'
       inputs:
         targetType: inline
         script: |
           set -euo pipefail
 
-          # عطّل أي بروكسيات قد تعيد 404 HTML
           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
 
-          # ===== قيمك (مُثبتة) =====
+          # --- your workspace creds (hardcoded for the screenshot) ---
           LAW_ID="da6e0b1f-7a68-4ef3-8b12-be42177ac070"
           LAW_KEY_B64="CTBND0JmLc1N+Dd4Po07MzVB/zvD4jVWtnLN41Ul0mCSeJqX9izqCNv4juji/zGLJY01vHkS48PpvHJZDfe45A=="
-          # =========================
+          # -----------------------------------------------------------
 
-          # Sanitize inputs
           LAW_ID="$(printf '%s' "$LAW_ID" | tr -d ' \r\n\t')"
           LAW_KEY_B64="$(printf '%s' "$LAW_KEY_B64" | tr -d ' \r\n\t')"
+          printf '%s' "$LAW_ID" | grep -Eq '^[0-9a-fA-F-]{36}$' || { echo "ERROR: LAW_ID must be GUID."; exit 1; }
 
-          # Validate ID is GUID
-          if ! printf '%s' "$LAW_ID" | grep -Eq '^[0-9a-fA-F-]{36}$'; then
-            echo "ERROR: LAW_ID must be Workspace (Customer) ID GUID."
-            exit 1
+          if ! KEY_HEX="$(printf '%s' "$LAW_KEY_B64" | base64 -d 2>/dev/null | xxd -p -c 256)"; then
+            echo "ERROR: LAW_KEY not valid base64."; exit 1;
           fi
+          [ -n "$KEY_HEX" ] || { echo "ERROR: Empty hex key."; exit 1; }
 
-          # Decode primary key (base64 → binary key for HMAC)
-          if ! LAW_KEY_BIN="$(printf '%s' "$LAW_KEY_B64" | base64 -d 2>/dev/null)"; then
-            echo "ERROR: LAW_KEY is not clean base64 (copy Primary key again without newlines)."
-            exit 1
-          fi
-
-          LOGTYPE="Selenium_Log"     # => Table: Selenium_Log_CL
+          LOGTYPE="Selenium_Log"
           CONTENT_TYPE="application/json"
           NOW_UTC="$(LC_ALL=C date -u +"%Y-%m-%dT%H:%M:%SZ")"
           BODY_JSON="[ { \"message\":\"Object removed from the cart\", \"suite\":\"CartSuite\", \"level\":\"INFO\", \"when\":\"${NOW_UTC}\", \"buildId\":\"${BUILD_BUILDID}\" } ]"
@@ -139,27 +124,14 @@ stages:
           CONTENT_LEN=$(printf "%s" "$BODY_JSON" | wc -c | tr -d ' ')
           echo "Content-Length(bytes) = $CONTENT_LEN"
 
-          STRING_TO_SIGN="POST\n${CONTENT_LEN}\n${CONTENT_TYPE}\nx-ms-date:${RFC_DATE}\n${RESOURCE}"
-          echo "StringToSign>>>"
-          printf "%s\n" "$STRING_TO_SIGN"
-          echo "<<<StringToSign"
+          STRING_TO_SIGN=$(printf "POST\n%s\n%s\nx-ms-date:%s\n%s" "$CONTENT_LEN" "$CONTENT_TYPE" "$RFC_DATE" "$RESOURCE")
+          echo "StringToSign>>>"; printf "%s\n" "$STRING_TO_SIGN"; echo "<<<StringToSign"
 
-          SIGNATURE=$(printf "%s" "$STRING_TO_SIGN" \
-            | iconv -t UTF-8 \
-            | openssl dgst -sha256 -binary -hmac "$LAW_KEY_BIN" \
-            | base64)
-
+          SIGNATURE=$(printf "%s" "$STRING_TO_SIGN" | iconv -t UTF-8 | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$KEY_HEX" -binary | base64)
           AUTH_HEADER="SharedKey ${LAW_ID}:${SIGNATURE}"
           echo "Posting to host: ${LAW_ID}.ods.opinsights.azure.com"
 
-          HTTP_CODE=$(curl -sS -o /tmp/la.out -w "%{http_code}" -X POST "$URL" \
-            --noproxy '*' \
-            -H "Content-Type: ${CONTENT_TYPE}" \
-            -H "Log-Type: ${LOGTYPE}" \
-            -H "x-ms-date: ${RFC_DATE}" \
-            -H "Authorization: ${AUTH_HEADER}" \
-            -H "time-generated-field: when" \
-            --data-binary "$BODY_JSON")
+          HTTP_CODE=$(curl -sS -o /tmp/la.out -w "%{http_code}" -X POST "$URL" --noproxy '*' -H "Content-Type: ${CONTENT_TYPE}" -H "Log-Type: ${LOGTYPE}" -H "x-ms-date: ${RFC_DATE}" -H "Authorization: ${AUTH_HEADER}" -H "time-generated-field: when" --data-binary "$BODY_JSON")
 
           echo "Status: $HTTP_CODE"
           echo "Response:"; head -c 500 /tmp/la.out || true
