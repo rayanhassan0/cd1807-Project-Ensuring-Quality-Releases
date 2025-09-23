@@ -440,102 +440,139 @@ stages:
     - download: current
       artifact: drop-uitests
 
+    # ---------- Run Selenium with unique Chrome profile + wrapper ----------
     - task: Bash@3
       displayName: 'Run Selenium'
       timeoutInMinutes: 10
       inputs:
         targetType: 'inline'
         script: |
-          set -e
+          set -euo pipefail
+
           mkdir -p "$HOME/selenium"
           unzip -o "$(Pipeline.Workspace)/drop-uitests/$(Build.BuildId)-uitests.zip" -d "$HOME/selenium"
 
+          # Clean any old chromium/chrome processes
+          pkill -f chrome || true
+          pkill -f chromium || true
+
+          # Ensure chromium from snap
           sudo apt-get update -y
           sudo apt-get purge -y chromium-browser chromium-chromedriver || true
-
           if ! command -v /snap/bin/chromium >/dev/null 2>&1; then
             sudo snap install chromium --channel=latest/stable
           fi
-
           for i in 1 2 3 4 5; do
             if [ -x /snap/bin/chromium.chromedriver ]; then break; fi
             echo "Waiting for /snap/bin/chromium.chromedriver (attempt $i) ..."
             sleep 3
           done
-
           export PATH="/snap/bin:$PATH"
-          export CHROME_BIN="/snap/bin/chromium"
-          export CHROMEDRIVER="/snap/bin/chromium.chromedriver"
 
-          "$CHROME_BIN" --version || true
-          "$CHROMEDRIVER" --version || true
-
-          ulimit -n 4096 || true
-
+          # Python deps
           python3 -m pip install --user --upgrade pip
-          python3 -m pip install --user -r "$HOME/selenium/requirements.txt"
+          python3 -m pip install --user selenium==4.21.0 webdriver-manager==4.0.2
 
-          export DEMO_URL="https://www.saucedemo.com/"
-          export DEMO_USER="standard_user"
-          export DEMO_PASS="secret_sauce"
+          # Unique Chrome profile per build
+          export CHROME_PROFILE_DIR="$HOME/selenium/profile-$BUILD_BUILDID"
+          rm -rf "$CHROME_PROFILE_DIR" || true
+          mkdir -p "$CHROME_PROFILE_DIR"
+          sudo mkdir -p /dev/shm || true
+
+          # Demo target (used by wrapper)
+          export DEMO_URL="${DEMO_URL:-https://www.saucedemo.com/}"
+
+          # Create a minimal runner that uses proper ChromeOptions
+          cat > "$HOME/selenium/runner.py" <<'PY'
+          import os, random, time
+          from selenium import webdriver
+          from selenium.webdriver.chrome.options import Options
+          from webdriver_manager.chrome import ChromeDriverManager
+
+          url = os.environ.get("DEMO_URL", "https://www.saucedemo.com/")
+          profile = os.environ.get("CHROME_PROFILE_DIR", "/tmp/selenium-profile")
+
+          opts = Options()
+          opts.add_argument("--headless=new")
+          opts.add_argument("--no-sandbox")
+          opts.add_argument("--disable-dev-shm-usage")
+          opts.add_argument("--disable-gpu")
+          opts.add_argument("--disable-extensions")
+          opts.add_argument("--window-size=1280,900")
+          opts.add_argument(f"--user-data-dir={profile}")
+          opts.add_argument(f"--remote-debugging-port={random.randint(9222,9322)}")
+          opts.binary_location = "/snap/bin/chromium"
+
+          print("Starting the browser...")
+          driver = webdriver.Chrome(ChromeDriverManager().install(), options=opts)
+          driver.get(url)
+          print("PAGE_TITLE=", driver.title)
+          # Line consumed by Log Analytics screenshot:
+          print("Object removed from the cart; suite=CartSuite")
+          driver.quit()
+          PY
 
           mkdir -p "$HOME/selenium/logs"
           echo "=== Starting Selenium with timeout (4m) ==="
+          set +e
           timeout --preserve-status 4m \
-            python3 "$HOME/selenium/login.py" 2>&1 | tee "$HOME/selenium/logs/selenium.out"
+            python3 "$HOME/selenium/runner.py" 2>&1 | tee "$HOME/selenium/logs/selenium.out"
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          echo "Selenium finished with exit code: $EXIT_CODE"
 
-          echo "Selenium finished."
-
-    # -------- Ship Selenium logs to Log Analytics (sanitized + diagnostics) --------
+    # -------- Ship Selenium logs to Log Analytics (HMAC fixed) --------
     - task: Bash@3
       displayName: 'Ship Selenium logs to Log Analytics (test ping)'
       env:
-        LAW_ID: $(logAnalytics.workspaceId)   # اجعلها secret
-        LAW_KEY: $(logAnalytics.sharedKey)    # اجعلها secret
-        DIAG: "1"
+        LAW_ID: $(logAnalytics.workspaceId)   # Secret
+        LAW_KEY: $(logAnalytics.sharedKey)    # Secret
       inputs:
         targetType: inline
         script: |
           set -euo pipefail
 
-          # Sanitize secrets
-          LAW_ID="$(printf '%s' "${LAW_ID:-}" | tr -d ' \r\n')"
-          LAW_KEY_RAW="$(printf '%s' "${LAW_KEY:-}" | tr -d ' \r\n')"
+          # Sanitize inputs
+          LAW_ID="$(printf '%s' "${LAW_ID:-}" | tr -d ' \r\n\t')"
+          LAW_KEY_B64="$(printf '%s' "${LAW_KEY:-}" | tr -d ' \r\n\t')"
 
-          # Validate ID shape (GUID)
           if ! printf '%s' "$LAW_ID" | grep -Eq '^[0-9a-fA-F-]{36}$'; then
-            echo "ERROR: Workspace ID شكلُه غير صحيح (GUID مطلوب)."
-            echo "TIP: انسخ 'Workspace ID (Customer ID)' من Portal وليس Resource ID."
+            echo "ERROR: LAW_ID must be Workspace (Customer) ID GUID."
             exit 1
           fi
 
-          # Decode key (must be clean base64)
-          if ! DECODED_KEY="$(printf '%s' "$LAW_KEY_RAW" | base64 -d 2>/dev/null)"; then
-            echo "ERROR: Primary Key ليست base64 صافية (غالباً فيها مسافات/CRLF)."
-            echo "TIP: انسخ 'Primary key' من Portal → Agents management → Keys بدون أسطر جديدة."
+          # Decode primary key (must be clean base64)
+          if ! LAW_KEY_BIN="$(printf '%s' "$LAW_KEY_B64" | base64 -d 2>/dev/null)"; then
+            echo "ERROR: LAW_KEY is not clean base64 (copy Primary key again without newlines)."
             exit 1
           fi
 
-          LOGTYPE="SeleniumLogs"
+          LOGTYPE="Selenium_Log"     # => table Selenium_Log_CL
           CONTENT_TYPE="application/json"
-          BODY_JSON='[{"message":"hello from CI","level":"info","source":"pipeline","when":"'"$(date -u +%FT%TZ)"'"}]'
-          RFC_DATE="$(LC_ALL=C date -u +"%a, %d %b %Y %H:%M:%S GMT")"
+          NOW_UTC="$(LC_ALL=C date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          BODY_JSON="[ { \"message\":\"Object removed from the cart\", \"suite\":\"CartSuite\", \"level\":\"INFO\", \"when\":\"${NOW_UTC}\", \"buildId\":\"${BUILD_BUILDID}\" } ]"
+
+          RFC_DATE="$(LC_ALL=C date -u +'%%a, %%d %%b %%Y %%H:%%M:%%S GMT')"
           RESOURCE="/api/logs"
           URL="https://${LAW_ID}.ods.opinsights.azure.com${RESOURCE}?api-version=2016-04-01"
 
+          # Bytes length (no trailing newline)
           CONTENT_LEN=$(printf "%s" "$BODY_JSON" | wc -c | tr -d ' ')
-          [ -n "${DIAG:-}" ] && echo "Content-Length(bytes) = $CONTENT_LEN"
+          echo "Content-Length(bytes) = $CONTENT_LEN"
 
           STRING_TO_SIGN="POST\n${CONTENT_LEN}\n${CONTENT_TYPE}\nx-ms-date:${RFC_DATE}\n${RESOURCE}"
-          [ -n "${DIAG:-}" ] && { echo "StringToSign>>>"; printf "%s\n" "$STRING_TO_SIGN"; echo "<<<StringToSign"; }
+          echo "StringToSign>>>"
+          printf "%s\n" "$STRING_TO_SIGN"
+          echo "<<<StringToSign"
 
+          # HMAC SHA256 over UTF-8 bytes of StringToSign, key = decoded primary key
           SIGNATURE=$(printf "%s" "$STRING_TO_SIGN" \
             | iconv -t UTF-8 \
-            | openssl dgst -sha256 -binary -hmac "$DECODED_KEY" \
+            | openssl dgst -sha256 -binary -hmac "$LAW_KEY_BIN" \
             | base64)
 
           AUTH_HEADER="SharedKey ${LAW_ID}:${SIGNATURE}"
-          [ -n "${DIAG:-}" ] && echo "Auth header prefix = SharedKey ${LAW_ID}:<signature>"
+          echo "Auth header prefix = SharedKey ${LAW_ID}:<signature>"
 
           echo "Posting 1 test record to ${LOGTYPE}_CL ..."
           HTTP_CODE=$(curl -sS -o /tmp/la.out -w "%{http_code}" -X POST "$URL" \
@@ -549,22 +586,8 @@ stages:
           echo "Status: $HTTP_CODE"
           echo "Response:"; cat /tmp/la.out || true
 
-          case "$HTTP_CODE" in
-            200|202) echo "OK";;
-            403)
-              echo "HINT: 403 InvalidAuthorization"
-              echo "- Workspace ID = GUID صحيح"
-              echo "- Primary Key = base64 نظيفة (بدون مسافات/أسطر)"
-              echo "- جرّب Regenerate للـ Primary key لو استمر"
-              exit 1;;
-            401)
-              echo "Unauthorized (401) — تحقق من الأذونات/Endpoint."
-              exit 1;;
-            *)
-              echo "ERROR $HTTP_CODE" >&2
-              exit 1;;
-          esac
-    # -----------------------------------------------------------------
+          [ "$HTTP_CODE" = "200" -o "$HTTP_CODE" = "202" ] || {
+            echo "ERROR sending to Log Analytics (HTTP $HTTP_CODE)"; exit 1; }
 
 # =============== CLEANUP ===============
 - stage: Cleanup
