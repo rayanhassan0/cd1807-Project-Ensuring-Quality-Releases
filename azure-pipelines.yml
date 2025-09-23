@@ -6,9 +6,6 @@ pool:
   name: myAgentPool
 
 variables:
-  # سكرتين لازم تضيفهم في Variables كـ secret:
-  # - logAnalytics.workspaceId  (Workspace/Customer ID - GUID)
-  # - logAnalytics.sharedKey    (Primary Key)
   DEMO_URL: 'https://www.saucedemo.com/'
 
 stages:
@@ -100,10 +97,7 @@ stages:
           echo "Selenium finished with exit code: $EXIT_CODE"
 
     - task: Bash@3
-      displayName: 'Ship Selenium log to Log Analytics'
-      env:
-        LAW_ID: $(logAnalytics.workspaceId)   # Secret
-        LAW_KEY: $(logAnalytics.sharedKey)    # Secret
+      displayName: 'Ship Selenium log to Log Analytics (hardcoded creds)'
       inputs:
         targetType: inline
         script: |
@@ -112,9 +106,14 @@ stages:
           # عطّل أي بروكسيات قد تعيد 404 HTML
           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
 
+          # ===== قيمك (مُثبتة) =====
+          LAW_ID="da6e0b1f-7a68-4ef3-8b12-be42177ac070"
+          LAW_KEY_B64="CTBND0JmLc1N+Dd4Po07MzVB/zvD4jVWtnLN41Ul0mCSeJqX9izqCNv4juji/zGLJY01vHkS48PpvHJZDfe45A=="
+          # =========================
+
           # Sanitize inputs
-          LAW_ID="$(printf '%s' "${LAW_ID:-}" | tr -d ' \r\n\t')"
-          LAW_KEY_B64="$(printf '%s' "${LAW_KEY:-}" | tr -d ' \r\n\t')"
+          LAW_ID="$(printf '%s' "$LAW_ID" | tr -d ' \r\n\t')"
+          LAW_KEY_B64="$(printf '%s' "$LAW_KEY_B64" | tr -d ' \r\n\t')"
 
           # Validate ID is GUID
           if ! printf '%s' "$LAW_ID" | grep -Eq '^[0-9a-fA-F-]{36}$'; then
