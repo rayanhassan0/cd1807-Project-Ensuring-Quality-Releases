@@ -90,52 +90,76 @@ stages:
           echo "Selenium finished with exit code: $EXIT_CODE"
 
     - task: Bash@3
-      displayName: 'Ship Selenium log to Log Analytics (fixed HMAC + YAML-safe)'
+      displayName: 'Ship Selenium logs (2 writes, fixed HMAC)'
       inputs:
         targetType: inline
         script: |
           set -euo pipefail
 
+          # تعطيل أي بروكسيات قد تغيّر الوجهة
           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
 
-          # --- your workspace creds (hardcoded for the screenshot) ---
+          # --- Workspace creds (hardcoded للسكرين-شوت) ---
           LAW_ID="da6e0b1f-7a68-4ef3-8b12-be42177ac070"
           LAW_KEY_B64="CTBND0JmLc1N+Dd4Po07MzVB/zvD4jVWtnLN41Ul0mCSeJqX9izqCNv4juji/zGLJY01vHkS48PpvHJZDfe45A=="
-          # -----------------------------------------------------------
+          # ------------------------------------------------
 
+          # Sanitize + تحقق من الـ GUID
           LAW_ID="$(printf '%s' "$LAW_ID" | tr -d ' \r\n\t')"
           LAW_KEY_B64="$(printf '%s' "$LAW_KEY_B64" | tr -d ' \r\n\t')"
           printf '%s' "$LAW_ID" | grep -Eq '^[0-9a-fA-F-]{36}$' || { echo "ERROR: LAW_ID must be GUID."; exit 1; }
 
-          if ! KEY_HEX="$(printf '%s' "$LAW_KEY_B64" | base64 -d 2>/dev/null | xxd -p -c 256)"; then
-            echo "ERROR: LAW_KEY not valid base64."; exit 1;
-          fi
-          [ -n "$KEY_HEX" ] || { echo "ERROR: Empty hex key."; exit 1; }
+          # فكّ الـ Base64 إلى HEX لاستخدامه كمفتاح HMAC سليم
+          KEY_HEX="$(printf '%s' "$LAW_KEY_B64" | base64 -d 2>/dev/null | xxd -p -c 256)" || { echo "ERROR: invalid base64 key"; exit 1; }
+          [ -n "$KEY_HEX" ] || { echo "ERROR: empty hex key"; exit 1; }
 
-          LOGTYPE="Selenium_Log"
           CONTENT_TYPE="application/json"
-          NOW_UTC="$(LC_ALL=C date -u +"%Y-%m-%dT%H:%M:%SZ")"
-          BODY_JSON="[ { \"message\":\"Object removed from the cart\", \"suite\":\"CartSuite\", \"level\":\"INFO\", \"when\":\"${NOW_UTC}\", \"buildId\":\"${BUILD_BUILDID}\" } ]"
-
           RFC_DATE="$(LC_ALL=C date -u +"%a, %d %b %Y %H:%M:%S GMT")"
           RESOURCE="/api/logs"
-          URL="https://${LAW_ID}.ods.opinsights.azure.com${RESOURCE}?api-version=2016-04-01"
+          HOST="https://${LAW_ID}.ods.opinsights.azure.com${RESOURCE}?api-version=2016-04-01"
 
-          CONTENT_LEN=$(printf "%s" "$BODY_JSON" | wc -c | tr -d ' ')
-          echo "Content-Length(bytes) = $CONTENT_LEN"
+          send_log () {
+            local LOGTYPE="$1" BODY="$2" ADD_TIME_HEADER="$3"
+            local LEN STRING_TO_SIGN SIG AUTH CODE
+            LEN=$(printf "%s" "$BODY" | wc -c | tr -d ' ')
+            STRING_TO_SIGN=$(printf "POST\n%s\n%s\nx-ms-date:%s\n%s" "$LEN" "$CONTENT_TYPE" "$RFC_DATE" "$RESOURCE")
+            SIG=$(printf "%s" "$STRING_TO_SIGN" | iconv -t UTF-8 | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$KEY_HEX" -binary | base64)
+            AUTH="SharedKey ${LAW_ID}:${SIG}"
 
-          STRING_TO_SIGN=$(printf "POST\n%s\n%s\nx-ms-date:%s\n%s" "$CONTENT_LEN" "$CONTENT_TYPE" "$RFC_DATE" "$RESOURCE")
-          echo "StringToSign>>>"; printf "%s\n" "$STRING_TO_SIGN"; echo "<<<StringToSign"
+            if [ "$ADD_TIME_HEADER" = "yes" ]; then
+              CODE=$(curl -sS -o /tmp/la.out -w "%{http_code}" -X POST "$HOST" --noproxy '*' \
+                -H "Content-Type: ${CONTENT_TYPE}" \
+                -H "Log-Type: ${LOGTYPE}" \
+                -H "x-ms-date: ${RFC_DATE}" \
+                -H "Authorization: ${AUTH}" \
+                -H "time-generated-field: when" \
+                --data-binary "$BODY")
+            else
+              CODE=$(curl -sS -o /tmp/la.out -w "%{http_code}" -X POST "$HOST" --noproxy '*' \
+                -H "Content-Type: ${CONTENT_TYPE}" \
+                -H "Log-Type: ${LOGTYPE}" \
+                -H "x-ms-date: ${RFC_DATE}" \
+                -H "Authorization: ${AUTH}" \
+                --data-binary "$BODY")
+            fi
 
-          SIGNATURE=$(printf "%s" "$STRING_TO_SIGN" | iconv -t UTF-8 | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$KEY_HEX" -binary | base64)
-          AUTH_HEADER="SharedKey ${LAW_ID}:${SIGNATURE}"
-          echo "Posting to host: ${LAW_ID}.ods.opinsights.azure.com"
+            echo "$CODE"
+          }
 
-          HTTP_CODE=$(curl -sS -o /tmp/la.out -w "%{http_code}" -X POST "$URL" --noproxy '*' -H "Content-Type: ${CONTENT_TYPE}" -H "Log-Type: ${LOGTYPE}" -H "x-ms-date: ${RFC_DATE}" -H "Authorization: ${AUTH_HEADER}" -H "time-generated-field: when" --data-binary "$BODY_JSON")
+          # 1) مع time-generated-field  -> جدول Selenium_Log_CL
+          NOW_UTC="$(LC_ALL=C date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          BODY1="[ { \"message\":\"Object removed from the cart\", \"suite\":\"CartSuite\", \"level\":\"INFO\", \"when\":\"${NOW_UTC}\", \"buildId\":\"${BUILD_BUILDID}\" } ]"
+          CODE1=$(send_log "Selenium_Log" "$BODY1" "yes")
+          echo "POST#1 Status: $CODE1"; head -c 300 /tmp/la.out || true; echo
 
-          echo "Status: $HTTP_CODE"
-          echo "Response:"; head -c 500 /tmp/la.out || true
+          # 2) بدون time-generated-field -> جدول SeleniumLog_CL (يستخدم وقت الإدخال)
+          BODY2="[ { \"message\":\"cart event (ingestion time)\", \"suite\":\"CartSuite\", \"level\":\"INFO\", \"buildId\":\"${BUILD_BUILDID}\" } ]"
+          CODE2=$(send_log "SeleniumLog" "$BODY2" "no")
+          echo "POST#2 Status: $CODE2"; head -c 300 /tmp/la.out || true; echo
 
-          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "202" ]; then
-            echo "ERROR sending to Log Analytics (HTTP $HTTP_CODE)"; exit 1;
+          # اعتبر النجاح إذا واحد منهما رجع 200/202
+          if [ "$CODE1" = "200" ] || [ "$CODE1" = "202" ] || [ "$CODE2" = "200" ] || [ "$CODE2" = "202" ]; then
+            echo "OK: at least one record ingested"
+          else
+            echo "ERROR: both posts failed ($CODE1, $CODE2)"; exit 1;
           fi
