@@ -248,7 +248,6 @@ stages:
       displayName: 'Publish Perf Tests Artifact'
       artifact: drop-perftests
 
-    # Prepare JMeter once and publish as artifact
     - task: Bash@3
       displayName: 'Download JMeter binary (once)'
       inputs:
@@ -294,7 +293,6 @@ stages:
               ls -lh "$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
             displayName: 'Show package size'
 
-          # Deploy without Kudu: WEBSITE_RUN_FROM_PACKAGE via Blob SAS
           - task: AzureCLI@2
             displayName: 'Deploy via Run-From-Package (Blob SAS)'
             inputs:
@@ -359,7 +357,6 @@ stages:
           - download: current
             artifact: jmeter-bin
 
-          # === Install Java and ensure JMeter is executable ===
           - task: Bash@3
             displayName: 'Prep JMeter: install Java + chmod bin'
             inputs:
@@ -441,7 +438,6 @@ stages:
     - download: current
       artifact: drop-uitests
 
-    # ---------- Run Selenium with unique Chrome profile ----------
     - task: Bash@3
       displayName: 'Run Selenium'
       timeoutInMinutes: 10
@@ -524,13 +520,13 @@ stages:
           set -euo pipefail
           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
 
-          # نفس القيم (لا تغيّرها)
+          # لا تغيّر القيم
           LAW_ID="da6e0b1f-7a68-4ef3-8b12-be42177ac070"
           LAW_KEY_B64="CTBND0JmLc1N+Dd4Po07MzVB/zvD4jVWtnLN41Ul0mCSeJqX9izqCNv4juji/zGLJY01vHkS48PpvHJZDfe45A=="
-          LOGTYPE="selenium_log"   # => الجدول سيظهر كـ selenium_log_CL
+          LOGTYPE="selenium_log"   # سيُنشئ/يكتب على selenium_log_CL
           COMPUTER="TrialVM"
 
-          # jq لتحويل الـ JSON
+          # تأكد من وجود jq
           if ! command -v jq >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
               sudo apt-get update -y && sudo apt-get install -y jq
@@ -557,10 +553,12 @@ stages:
           done <<<"$MATCHED"
 
           BODY_JSON=$(jq -s '.' raw.jsonl)
-          CONTENT_LEN=$(printf "%s" "$BODY_JSON" | wc -c | tr -d ' ')
+
           RFC_DATE="$(LC_ALL=C date -u +"%a, %d %b %Y %H:%M:%S GMT")"
           RESOURCE="/api/logs"
           URL="https://${LAW_ID}.ods.opinsights.azure.com${RESOURCE}?api-version=2016-04-01"
+
+          CONTENT_LEN=$(printf "%s" "$BODY_JSON" | wc -c | tr -d ' ')
 
           STRING_TO_SIGN=$(printf "POST\n%s\napplication/json\nx-ms-date:%s\n%s" \
             "$CONTENT_LEN" "$RFC_DATE" "$RESOURCE")
