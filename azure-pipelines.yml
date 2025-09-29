@@ -141,16 +141,13 @@ stages:
         script: |
           set -e
           NEED_PKGS=""
-          command -v zip     >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS zip"
-          command -v unzip   >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS unzip"
-          command -v pip3    >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS python3-pip"
-
+          command -v zip >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS zip"
+          command -v unzip >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS unzip"
+          command -v pip3 >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS python3-pip"
           if [ -z "$NEED_PKGS" ]; then
             echo "zip/unzip/pip3 already present. Skipping install."
             exit 0
           fi
-
-          echo "Installing: $NEED_PKGS"
           if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get update -y
             sudo apt-get install -y $NEED_PKGS
@@ -181,7 +178,7 @@ stages:
         script: |
           set -e
           mkdir -p '$(Build.SourcesDirectory)/automatedtesting/postman/results'
-          rm -f   '$(Build.SourcesDirectory)/automatedtesting/postman/results/'*.xml
+          rm -f '$(Build.SourcesDirectory)/automatedtesting/postman/results/'*.xml
 
     - task: CmdLine@2
       displayName: 'Run Data Validation Tests'
@@ -307,29 +304,13 @@ stages:
                 CN="webpackages"
                 ZIP="$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
                 BLOB="$(Build.BuildId)-fakerestapi.zip"
-
                 KEY=$(az storage account keys list -g "$RG" -n "$SA" --query "[0].value" -o tsv)
                 az storage container create --account-name "$SA" --name "$CN" --account-key "$KEY" --auth-mode key >/dev/null
-
-                echo "Upload package to blob..."
-                az storage blob upload \
-                  --account-name "$SA" --account-key "$KEY" \
-                  --container-name "$CN" --name "$BLOB" \
-                  --file "$ZIP" --overwrite true --auth-mode key
-
-                echo "Generate read-only SAS for 7 days..."
+                az storage blob upload --account-name "$SA" --account-key "$KEY" --container-name "$CN" --name "$BLOB" --file "$ZIP" --overwrite true --auth-mode key
                 EXP="$(date -u -d '+7 days' +'%Y-%m-%dT%H:%MZ')"
-                SAS=$(az storage blob generate-sas \
-                  --account-name "$SA" --account-key "$KEY" \
-                  --container-name "$CN" --name "$BLOB" \
-                  --permissions r --expiry "$EXP" -o tsv)
-
+                SAS=$(az storage blob generate-sas --account-name "$SA" --account-key "$KEY" --container-name "$CN" --name "$BLOB" --permissions r --expiry "$EXP" -o tsv)
                 URL="https://$SA.blob.core.windows.net/$CN/$BLOB?$SAS"
-                echo "Set WEBSITE_RUN_FROM_PACKAGE to SAS URL"
-                az webapp config appsettings set -g "$RG" -n "$APP" \
-                  --settings WEBSITE_RUN_FROM_PACKAGE="$URL" SCM_DO_BUILD_DURING_DEPLOYMENT=false ENABLE_ORYX_BUILD=false
-
-                echo "Restart app"
+                az webapp config appsettings set -g "$RG" -n "$APP" --settings WEBSITE_RUN_FROM_PACKAGE="$URL" SCM_DO_BUILD_DURING_DEPLOYMENT=false ENABLE_ORYX_BUILD=false
                 az webapp restart -g "$RG" -n "$APP"
 
           - task: Bash@3
@@ -371,12 +352,10 @@ stages:
                     sudo yum install -y java-17-openjdk
                   fi
                 fi
-
                 JM_VER=5.6.3
                 JM="$(Pipeline.Workspace)/jmeter-bin/apache-jmeter-${JM_VER}"
                 chmod -R +x "$JM/bin" || true
                 find "$JM" -type f -name "*.sh" -exec chmod +x {} \; || true
-
                 java -version || true
                 "$JM/bin/jmeter" -v || true
 
@@ -389,33 +368,25 @@ stages:
                 set -e
                 cd "$(Pipeline.Workspace)"
                 mkdir -p perf && cd perf
-
                 JM_VER=5.6.3
                 JM="$(Pipeline.Workspace)/jmeter-bin/apache-jmeter-${JM_VER}"
                 [ -x "$JM/bin/jmeter" ] || { echo "JMeter not executable"; chmod -R +x "$JM/bin"; }
-
                 unzip -o "$(Pipeline.Workspace)/drop-perftests/$(Build.BuildId)-perftests.zip" -d perftests
-
                 if [ -f "perftests/Starter.jmx" ]; then
                   JMX="perftests/Starter.jmx"
                 elif [ -f "perftests/PerformanceTestSuite.jmx" ]; then
                   JMX="perftests/PerformanceTestSuite.jmx"
                 else
-                  echo "JMeter JMX not found under perftests/." && ls -la perftests && exit 1
+                  echo "JMeter JMX not found under perftests/."
+                  ls -la perftests
+                  exit 1
                 fi
-
                 APPURL="https://$(appServiceName)-$(Build.BuildId).azurewebsites.net"
-                echo "Starting standalone test @ $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+                echo "Starting standalone test"
                 set +e
-                "$JM/bin/jmeter" -n -t "$JMX" \
-                  -JAPPSERVICEURL="$APPURL" \
-                  -JAPP_URL="$APPURL" \
-                  -JBASE_URL="$APPURL" \
-                  -Jsummariser.name=summary \
-                  -l perftests/results.jtl
+                "$JM/bin/jmeter" -n -t "$JMX" -JAPPSERVICEURL="$APPURL" -JAPP_URL="$APPURL" -JBASE_URL="$APPURL" -Jsummariser.name=summary -l perftests/results.jtl
                 JM_EXIT=$?
                 set -e
-
                 mkdir -p perftests/html-report
                 if [ -s perftests/results.jtl ]; then
                   "$JM/bin/jmeter" -g perftests/results.jtl -o perftests/html-report || true
@@ -445,13 +416,10 @@ stages:
         targetType: 'inline'
         script: |
           set -euo pipefail
-
           mkdir -p "$HOME/selenium"
           unzip -o "$(Pipeline.Workspace)/drop-uitests/$(Build.BuildId)-uitests.zip" -d "$HOME/selenium"
-
           pkill -f chrome || true
           pkill -f chromium || true
-
           sudo apt-get update -y
           sudo apt-get purge -y chromium-browser chromium-chromedriver || true
           if ! command -v /snap/bin/chromium >/dev/null 2>&1; then
@@ -463,26 +431,20 @@ stages:
             sleep 3
           done
           export PATH="/snap/bin:$PATH"
-
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user selenium==4.21.0 webdriver-manager==4.0.2
-
           export CHROME_PROFILE_DIR="$HOME/selenium/profile-$BUILD_BUILDID"
           rm -rf "$CHROME_PROFILE_DIR" || true
           mkdir -p "$CHROME_PROFILE_DIR"
           sudo mkdir -p /dev/shm || true
-
           export DEMO_URL="${DEMO_URL:-https://www.saucedemo.com/}"
-
           cat > "$HOME/selenium/runner.py" <<'PY'
           import os, random
           from selenium import webdriver
           from selenium.webdriver.chrome.options import Options
           from webdriver_manager.chrome import ChromeDriverManager
-
           url = os.environ.get("DEMO_URL", "https://www.saucedemo.com/")
           profile = os.environ.get("CHROME_PROFILE_DIR", "/tmp/selenium-profile")
-
           opts = Options()
           opts.add_argument("--headless=new")
           opts.add_argument("--no-sandbox")
@@ -493,7 +455,6 @@ stages:
           opts.add_argument(f"--user-data-dir={profile}")
           opts.add_argument(f"--remote-debugging-port={random.randint(9222,9322)}")
           opts.binary_location = "/snap/bin/chromium"
-
           print("Starting the browser...")
           driver = webdriver.Chrome(ChromeDriverManager().install(), options=opts)
           driver.get(url)
@@ -501,17 +462,13 @@ stages:
           print("Object removed from the cart; suite=CartSuite")
           driver.quit()
           PY
-
           mkdir -p "$HOME/selenium/logs"
-          echo "=== Starting Selenium with timeout (4m) ==="
           set +e
-          timeout --preserve-status 4m \
-            python3 "$HOME/selenium/runner.py" 2>&1 | tee "$HOME/selenium/logs/selenium.out"
+          timeout --preserve-status 4m python3 "$HOME/selenium/runner.py" 2>&1 | tee "$HOME/selenium/logs/selenium.out"
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
           echo "Selenium finished with exit code: $EXIT_CODE"
 
-    # -------- Ship Selenium logs to Log Analytics (RAW → selenium_log_CL) --------
     - task: Bash@3
       displayName: 'Ship Selenium RawData to Log Analytics (classic look)'
       inputs:
@@ -519,14 +476,10 @@ stages:
         script: |
           set -euo pipefail
           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
-
-          # لا تغيّر القيم
           LAW_ID="da6e0b1f-7a68-4ef3-8b12-be42177ac070"
           LAW_KEY_B64="CTBND0JmLc1N+Dd4Po07MzVB/zvD4jVWtnLN41Ul0mCSeJqX9izqCNv4juji/zGLJY01vHkS48PpvHJZDfe45A=="
-          LOGTYPE="selenium_log"   # سيُنشئ/يكتب على selenium_log_CL
+          LOGTYPE="selenium_log"
           COMPUTER="TrialVM"
-
-          # تأكد من وجود jq
           if ! command -v jq >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
               sudo apt-get update -y && sudo apt-get install -y jq
@@ -534,35 +487,24 @@ stages:
               sudo yum install -y jq
             fi
           fi
-
           LOG="$HOME/selenium/logs/selenium.out"
           NOW_UTC="$(LC_ALL=C date -u +"%Y-%m-%d %H:%M:%S")"
           BUILDID="${BUILD_BUILDID:-manual}"
-
           MATCHED=$(grep -E 'Object .* (added|removed) from the cart|PAGE_TITLE=' "$LOG" || true)
           if [ -z "$MATCHED" ]; then
-            echo "WARN: No matching lines in $LOG; sending a placeholder."
             MATCHED="Selenium run complete"
           fi
-
           rm -f raw.jsonl
           while IFS= read -r line; do
             line_esc=$(printf '%s' "$line" | sed 's/"/\\"/g')
-            printf '{"RawData":"%s UTC BuildId=%s %s","Computer":"%s"}\n' \
-                   "$NOW_UTC" "$BUILDID" "$line_esc" "$COMPUTER" >> raw.jsonl
+            printf '{"RawData":"%s UTC BuildId=%s %s","Computer":"%s"}\n' "$NOW_UTC" "$BUILDID" "$line_esc" "$COMPUTER" >> raw.jsonl
           done <<<"$MATCHED"
-
           BODY_JSON=$(jq -s '.' raw.jsonl)
-
+          CONTENT_LEN=$(printf "%s" "$BODY_JSON" | wc -c | tr -d ' ')
           RFC_DATE="$(LC_ALL=C date -u +"%a, %d %b %Y %H:%M:%S GMT")"
           RESOURCE="/api/logs"
           URL="https://${LAW_ID}.ods.opinsights.azure.com${RESOURCE}?api-version=2016-04-01"
-
-          CONTENT_LEN=$(printf "%s" "$BODY_JSON" | wc -c | tr -d ' ')
-
-          STRING_TO_SIGN=$(printf "POST\n%s\napplication/json\nx-ms-date:%s\n%s" \
-            "$CONTENT_LEN" "$RFC_DATE" "$RESOURCE")
-
+          STRING_TO_SIGN=$(printf "POST\n%s\napplication/json\nx-ms-date:%s\n%s" "$CONTENT_LEN" "$RFC_DATE" "$RESOURCE")
           export STRING_TO_SIGN LAW_KEY_B64
           SIGNATURE=$(python3 - <<'PY'
 import os, base64, hmac, hashlib
@@ -571,22 +513,20 @@ key = base64.b64decode(os.environ['LAW_KEY_B64'])
 print(base64.b64encode(hmac.new(key, to_sign, hashlib.sha256).digest()).decode())
 PY
 )
-
           AUTH_HEADER="SharedKey ${LAW_ID}:${SIGNATURE}"
-
           HTTP_CODE=$(curl -sS -o /tmp/la.out -w "%{http_code}" -X POST "$URL" --noproxy '*' \
             -H "Content-Type: application/json" \
             -H "Log-Type: ${LOGTYPE}" \
             -H "x-ms-date: ${RFC_DATE}" \
             -H "Authorization: ${AUTH_HEADER}" \
             --data-binary "$BODY_JSON" || true)
-
           echo "HTTP_CODE=$HTTP_CODE"
           head -c 400 /tmp/la.out || true
           if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "202" ]; then
-            echo "ERROR: posting to Log Analytics failed"; exit 1
+            echo "ERROR: posting to Log Analytics failed"
+            exit 1
           fi
-          echo "✅ Logs sent to ${LOGTYPE}_CL"
+          echo "Logs sent to ${LOGTYPE}_CL"
 
 # =============== CLEANUP ===============
 - stage: Cleanup
