@@ -515,13 +515,7 @@ stages:
           URL="https://${LAW_ID}.ods.opinsights.azure.com${RESOURCE}?api-version=2016-04-01"
           STRING_TO_SIGN=$(printf "POST\n%s\napplication/json\nx-ms-date:%s\n%s" "$CONTENT_LEN" "$RFC_DATE" "$RESOURCE")
           export STRING_TO_SIGN LAW_KEY_B64
-          SIGNATURE=$(python3 - <<'PY'
-import os, base64, hmac, hashlib
-to_sign = os.environ['STRING_TO_SIGN'].encode('utf-8')
-key = base64.b64decode(os.environ['LAW_KEY_B64'])
-print(base64.b64encode(hmac.new(key, to_sign, hashlib.sha256).digest()).decode())
-PY
-)
+          SIGNATURE=$(python3 -c "import os,base64,hmac,hashlib,sys; to_sign=os.environ['STRING_TO_SIGN'].encode('utf-8'); key=base64.b64decode(os.environ['LAW_KEY_B64']); sys.stdout.write(base64.b64encode(hmac.new(key,to_sign,hashlib.sha256).digest()).decode())")
           AUTH_HEADER="SharedKey ${LAW_ID}:${SIGNATURE}"
           HTTP_CODE=$(curl -sS -o /tmp/la.out -w "%{http_code}" -X POST "$URL" --noproxy '*' \
             -H "Content-Type: application/json" \
