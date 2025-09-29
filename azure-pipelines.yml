@@ -14,6 +14,9 @@ variables:
   resourceGroup: 'Azuredevops'
   appServiceName: 'myapp-AppService'
   DEMO_URL: 'https://www.saucedemo.com/'
+  LAW_ID: 'da6e0b1f-7a68-4ef3-8b12-be42177ac070'
+  LOGTYPE: 'selenium_log'
+  # LAW_KEY_B64: (أضِفها كـ Secret من Variables/Library ولا تكتبها هنا)
 
 stages:
 
@@ -485,10 +488,13 @@ stages:
         script: |
           set -euo pipefail
           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
-          LAW_ID="da6e0b1f-7a68-4ef3-8b12-be42177ac070"
-          LAW_KEY_B64="CTBND0JmLc1N+Dd4Po07MzVB/zvD4jVWtnLN41Ul0mCSeJqX9izqCNv4juji/zGLJY01vHkS48PpvHJZDfe45A=="
-          LOGTYPE="selenium_log"
+
+          # استخدم متغيرات الـ pipeline بدل القيم الهاردكود
+          LAW_ID="$(LAW_ID)"
+          LAW_KEY_B64="$(LAW_KEY_B64)"
+          LOGTYPE="${LOGTYPE:-selenium_log}"
           COMPUTER="TrialVM"
+
           if ! command -v jq >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
               sudo apt-get update -y && sudo apt-get install -y jq
@@ -496,33 +502,41 @@ stages:
               sudo yum install -y jq
             fi
           fi
+
           LOG="$HOME/selenium/logs/selenium.out"
           NOW_UTC="$(LC_ALL=C date -u +"%Y-%m-%d %H:%M:%S")"
           BUILDID="${BUILD_BUILDID:-manual}"
+
           MATCHED=$(grep -E 'Object .* (added|removed) from the cart|PAGE_TITLE=' "$LOG" || true)
           if [ -z "$MATCHED" ]; then
             MATCHED="Selenium run complete"
           fi
+
           rm -f raw.jsonl
           while IFS= read -r line; do
             line_esc=$(printf '%s' "$line" | sed 's/"/\\"/g')
             printf '{"RawData":"%s UTC BuildId=%s %s","Computer":"%s"}\n' "$NOW_UTC" "$BUILDID" "$line_esc" "$COMPUTER" >> raw.jsonl
           done <<<"$MATCHED"
+
           BODY_JSON=$(jq -s '.' raw.jsonl)
           CONTENT_LEN=$(printf "%s" "$BODY_JSON" | wc -c | tr -d ' ')
           RFC_DATE="$(LC_ALL=C date -u +"%a, %d %b %Y %H:%M:%S GMT")"
           RESOURCE="/api/logs"
           URL="https://${LAW_ID}.ods.opinsights.azure.com${RESOURCE}?api-version=2016-04-01"
+
           STRING_TO_SIGN=$(printf "POST\n%s\napplication/json\nx-ms-date:%s\n%s" "$CONTENT_LEN" "$RFC_DATE" "$RESOURCE")
           export STRING_TO_SIGN LAW_KEY_B64
           SIGNATURE=$(python3 -c "import os,base64,hmac,hashlib,sys; to_sign=os.environ['STRING_TO_SIGN'].encode('utf-8'); key=base64.b64decode(os.environ['LAW_KEY_B64']); sys.stdout.write(base64.b64encode(hmac.new(key,to_sign,hashlib.sha256).digest()).decode())")
+
           AUTH_HEADER="SharedKey ${LAW_ID}:${SIGNATURE}"
+
           HTTP_CODE=$(curl -sS -o /tmp/la.out -w "%{http_code}" -X POST "$URL" --noproxy '*' \
             -H "Content-Type: application/json" \
             -H "Log-Type: ${LOGTYPE}" \
             -H "x-ms-date: ${RFC_DATE}" \
             -H "Authorization: ${AUTH_HEADER}" \
             --data-binary "$BODY_JSON" || true)
+
           echo "HTTP_CODE=$HTTP_CODE"
           head -c 400 /tmp/la.out || true
           if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "202" ]; then
