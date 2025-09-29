@@ -515,74 +515,78 @@ stages:
           set -e
           echo "Selenium finished with exit code: $EXIT_CODE"
 
-    # -------- Ship Selenium logs to Log Analytics (fixed HMAC + YAML-safe, HARDCODED CREDS) --------
+    # -------- Ship Selenium logs to Log Analytics (Classic look: selenium_log_CL with RawData) --------
     - task: Bash@3
-      displayName: 'Ship Selenium log to Log Analytics (fixed HMAC + YAML-safe)'
+      displayName: 'Ship Selenium RawData to Log Analytics (classic look)'
+      env:
+        LA_WORKSPACE_ID: $(LA_WORKSPACE_ID)   # set as secret variables
+        LA_SHARED_KEY:   $(LA_SHARED_KEY)
       inputs:
         targetType: inline
         script: |
           set -euo pipefail
 
-          # عطّل أي بروكسيات قد تغيّر الوجهة
           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
 
-          # --- your workspace creds (hardcoded for the screenshot) ---
-          LAW_ID="da6e0b1f-7a68-4ef3-8b12-be42177ac070"
-          LAW_KEY_B64="CTBND0JmLc1N+Dd4Po07MzVB/zvD4jVWtnLN41Ul0mCSeJqX9izqCNv4juji/zGLJY01vHkS48PpvHJZDfe45A=="
-          # -----------------------------------------------------------
-
-          LAW_ID="$(printf '%s' "$LAW_ID" | tr -d ' \r\n\t')"
-          LAW_KEY_B64="$(printf '%s' "$LAW_KEY_B64" | tr -d ' \r\n\t')"
-          printf '%s' "$LAW_ID" | grep -Eq '^[0-9a-fA-F-]{36}$' || { echo "ERROR: LAW_ID must be GUID."; exit 1; }
-
-          # فك Base64 -> HEX لاستخدامه كمفتاح HMAC سليم
-          if ! KEY_HEX="$(printf '%s' "$LAW_KEY_B64" | base64 -d 2>/dev/null | xxd -p -c 256)"; then
-            echo "ERROR: LAW_KEY not valid base64."; exit 1;
+          # ensure jq is available
+          if ! command -v jq >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get update -y
+              sudo apt-get install -y jq
+            elif command -v yum >/dev/null 2>&1; then
+              sudo yum install -y jq
+            fi
           fi
-          [ -n "$KEY_HEX" ] || { echo "ERROR: Empty hex key."; exit 1; }
 
-          LOGTYPE="Selenium_Log"     # => Table: Selenium_Log_CL
-          CONTENT_TYPE="application/json"
-          NOW_UTC="$(LC_ALL=C date -u +"%Y-%m-%dT%H:%M:%SZ")"
-          BODY_JSON="[ { \"message\":\"Object removed from the cart\", \"suite\":\"CartSuite\", \"level\":\"INFO\", \"when\":\"${NOW_UTC}\", \"buildId\":\"${BUILD_BUILDID}\" } ]"
+          LOG="$HOME/selenium/logs/selenium.out"
+          NOW_UTC="$(LC_ALL=C date -u +"%Y-%m-%d %H:%M:%S")"
+          BUILDID="${BUILD_BUILDID}"
+          COMPUTER="TrialVM"
 
-          RFC_DATE="$(LC_ALL=C date -u +"%a, %d %b %Y %H:%M:%S GMT")"
-          RESOURCE="/api/logs"
-          URL="https://${LAW_ID}.ods.opinsights.azure.com${RESOURCE}?api-version=2016-04-01"
+          # pick meaningful lines from Selenium log; adjust pattern if needed
+          MATCHED=$(grep -E 'Object .* (added|removed) from the cart|PAGE_TITLE=' "$LOG" || true)
+          if [ -z "$MATCHED" ]; then
+            echo "WARN: No matching lines found in $LOG; sending a placeholder line."
+            MATCHED="Selenium run complete"
+          fi
 
-          # طول المحتوى بالبايت
+          rm -f raw.jsonl
+          while IFS= read -r line; do
+            line_esc=$(printf '%s' "$line" | sed 's/"/\\"/g')
+            printf '{"RawData":"%s UTC BuildId=%s %s","Computer":"%s"}\n' \
+                   "$NOW_UTC" "$BUILDID" "$line_esc" "$COMPUTER" >> raw.jsonl
+          done <<<"$MATCHED"
+
+          BODY_JSON=$(jq -s '.' raw.jsonl)
           CONTENT_LEN=$(printf "%s" "$BODY_JSON" | wc -c | tr -d ' ')
-          echo "Content-Length(bytes) = $CONTENT_LEN"
+          RFC_DATE="$(LC_ALL=C date -u +"%a, %d %b %Y %H:%M:%S GMT")"
 
-          # ابنِ StringToSign بطريقة لا تكسر YAML
-          STRING_TO_SIGN=$(printf "POST\n%s\n%s\nx-ms-date:%s\n%s" \
-            "$CONTENT_LEN" "$CONTENT_TYPE" "$RFC_DATE" "$RESOURCE")
-          echo "StringToSign>>>"; printf "%s\n" "$STRING_TO_SIGN"; echo "<<<StringToSign"
+          RESOURCE="/api/logs"
+          URL="https://${LA_WORKSPACE_ID}.ods.opinsights.azure.com${RESOURCE}?api-version=2016-04-01"
+          STRING_TO_SIGN=$(printf "POST\n%s\napplication/json\nx-ms-date:%s\n%s" \
+            "$CONTENT_LEN" "$RFC_DATE" "$RESOURCE")
 
-          # التوقيع: openssl HMAC SHA256 مع hexkey
+          # sign with HMAC (shared key base64)
+          DECODED_KEY=$(printf '%s' "$LA_SHARED_KEY" | base64 -d)
           SIGNATURE=$(printf "%s" "$STRING_TO_SIGN" \
-            | iconv -t UTF-8 \
-            | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$KEY_HEX" -binary \
-            | base64)
+            | openssl sha256 -mac HMAC -macopt key:"$DECODED_KEY" -binary | base64)
 
-          AUTH_HEADER="SharedKey ${LAW_ID}:${SIGNATURE}"
-          echo "Posting to host: ${LAW_ID}.ods.opinsights.azure.com"
+          AUTH_HEADER="SharedKey ${LA_WORKSPACE_ID}:${SIGNATURE}"
 
-          # تنفيذ curl (سطر واحد لتفادي مشاكل YAML)
           HTTP_CODE=$(curl -sS -o /tmp/la.out -w "%{http_code}" -X POST "$URL" --noproxy '*' \
-            -H "Content-Type: ${CONTENT_TYPE}" \
-            -H "Log-Type: ${LOGTYPE}" \
+            -H "Content-Type: application/json" \
+            -H "Log-Type: selenium_log" \  # => table selenium_log_CL
             -H "x-ms-date: ${RFC_DATE}" \
             -H "Authorization: ${AUTH_HEADER}" \
-            -H "time-generated-field: when" \
             --data-binary "$BODY_JSON")
 
           echo "Status: $HTTP_CODE"
-          echo "Response:"; head -c 500 /tmp/la.out || true
+          head -c 500 /tmp/la.out || true
 
           if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "202" ]; then
             echo "ERROR sending to Log Analytics (HTTP $HTTP_CODE)"; exit 1;
           fi
+          echo "Logs sent to selenium_log_CL"
 
 # =============== CLEANUP ===============
 - stage: Cleanup
