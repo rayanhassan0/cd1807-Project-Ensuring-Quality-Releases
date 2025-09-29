@@ -515,24 +515,25 @@ stages:
           set -e
           echo "Selenium finished with exit code: $EXIT_CODE"
 
-    # -------- Ship Selenium logs to Log Analytics (Classic look: selenium_log_CL with RawData) --------
+    # -------- Ship Selenium logs to Log Analytics (RAW → selenium_log_CL) --------
     - task: Bash@3
       displayName: 'Ship Selenium RawData to Log Analytics (classic look)'
-      env:
-        LA_WORKSPACE_ID: $(LA_WORKSPACE_ID)   # set as secret variables
-        LA_SHARED_KEY:   $(LA_SHARED_KEY)
       inputs:
         targetType: inline
         script: |
           set -euo pipefail
-
           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
 
-          # ensure jq is available
+          # نفس القيم (لا تغيّرها)
+          LAW_ID="da6e0b1f-7a68-4ef3-8b12-be42177ac070"
+          LAW_KEY_B64="CTBND0JmLc1N+Dd4Po07MzVB/zvD4jVWtnLN41Ul0mCSeJqX9izqCNv4juji/zGLJY01vHkS48PpvHJZDfe45A=="
+          LOGTYPE="selenium_log"   # => الجدول سيظهر كـ selenium_log_CL
+          COMPUTER="TrialVM"
+
+          # jq لتحويل الـ JSON
           if ! command -v jq >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
-              sudo apt-get update -y
-              sudo apt-get install -y jq
+              sudo apt-get update -y && sudo apt-get install -y jq
             elif command -v yum >/dev/null 2>&1; then
               sudo yum install -y jq
             fi
@@ -540,13 +541,11 @@ stages:
 
           LOG="$HOME/selenium/logs/selenium.out"
           NOW_UTC="$(LC_ALL=C date -u +"%Y-%m-%d %H:%M:%S")"
-          BUILDID="${BUILD_BUILDID}"
-          COMPUTER="TrialVM"
+          BUILDID="${BUILD_BUILDID:-manual}"
 
-          # pick meaningful lines from Selenium log; adjust pattern if needed
           MATCHED=$(grep -E 'Object .* (added|removed) from the cart|PAGE_TITLE=' "$LOG" || true)
           if [ -z "$MATCHED" ]; then
-            echo "WARN: No matching lines found in $LOG; sending a placeholder line."
+            echo "WARN: No matching lines in $LOG; sending a placeholder."
             MATCHED="Selenium run complete"
           fi
 
@@ -560,33 +559,36 @@ stages:
           BODY_JSON=$(jq -s '.' raw.jsonl)
           CONTENT_LEN=$(printf "%s" "$BODY_JSON" | wc -c | tr -d ' ')
           RFC_DATE="$(LC_ALL=C date -u +"%a, %d %b %Y %H:%M:%S GMT")"
-
           RESOURCE="/api/logs"
-          URL="https://${LA_WORKSPACE_ID}.ods.opinsights.azure.com${RESOURCE}?api-version=2016-04-01"
+          URL="https://${LAW_ID}.ods.opinsights.azure.com${RESOURCE}?api-version=2016-04-01"
+
           STRING_TO_SIGN=$(printf "POST\n%s\napplication/json\nx-ms-date:%s\n%s" \
             "$CONTENT_LEN" "$RFC_DATE" "$RESOURCE")
 
-          # sign with HMAC (shared key base64)
-          DECODED_KEY=$(printf '%s' "$LA_SHARED_KEY" | base64 -d)
-          SIGNATURE=$(printf "%s" "$STRING_TO_SIGN" \
-            | openssl sha256 -mac HMAC -macopt key:"$DECODED_KEY" -binary | base64)
+          export STRING_TO_SIGN LAW_KEY_B64
+          SIGNATURE=$(python3 - <<'PY'
+import os, base64, hmac, hashlib
+to_sign = os.environ['STRING_TO_SIGN'].encode('utf-8')
+key = base64.b64decode(os.environ['LAW_KEY_B64'])
+print(base64.b64encode(hmac.new(key, to_sign, hashlib.sha256).digest()).decode())
+PY
+)
 
-          AUTH_HEADER="SharedKey ${LA_WORKSPACE_ID}:${SIGNATURE}"
+          AUTH_HEADER="SharedKey ${LAW_ID}:${SIGNATURE}"
 
           HTTP_CODE=$(curl -sS -o /tmp/la.out -w "%{http_code}" -X POST "$URL" --noproxy '*' \
             -H "Content-Type: application/json" \
-            -H "Log-Type: selenium_log" \  # => table selenium_log_CL
+            -H "Log-Type: ${LOGTYPE}" \
             -H "x-ms-date: ${RFC_DATE}" \
             -H "Authorization: ${AUTH_HEADER}" \
-            --data-binary "$BODY_JSON")
+            --data-binary "$BODY_JSON" || true)
 
-          echo "Status: $HTTP_CODE"
-          head -c 500 /tmp/la.out || true
-
+          echo "HTTP_CODE=$HTTP_CODE"
+          head -c 400 /tmp/la.out || true
           if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "202" ]; then
-            echo "ERROR sending to Log Analytics (HTTP $HTTP_CODE)"; exit 1;
+            echo "ERROR: posting to Log Analytics failed"; exit 1
           fi
-          echo "Logs sent to selenium_log_CL"
+          echo "✅ Logs sent to ${LOGTYPE}_CL"
 
 # =============== CLEANUP ===============
 - stage: Cleanup
