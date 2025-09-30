@@ -14,9 +14,11 @@ variables:
   resourceGroup: 'Azuredevops'
   appServiceName: 'myapp-AppService'
   DEMO_URL: 'https://www.saucedemo.com/'
+
+  # ===== Log Analytics (قِيَم صريحة داخل الملف) =====
+  LOGTYPE: 'Selenium_Log'   # الجدول سيكون Selenium_Log_CL
   LAW_ID: 'da6e0b1f-7a68-4ef3-8b12-be42177ac070'
-  LOGTYPE: 'selenium_log'
-  # LAW_KEY_B64: (أضِفها كـ Secret من Variables/Library ولا تكتبها هنا)
+  LAW_KEY_B64: 'CTBND0JmLc1N+Dd4Po07MzVB/zvD4jVWtnLN41Ul0mCSeJqX9izqCNv4juji/zGLJY01vHkS48PpvHJZDfe45A=='
 
 stages:
 
@@ -160,11 +162,10 @@ stages:
           elif command -v yum >/dev/null 2>&1; then
             sudo yum install -y $NEED_PKGS
           elif command -v zypper >/dev/null 2>&1; then
-            sudo zypper install -y $NEED_PKGS
+            sudo zyper install -y $NEED_PKGS || sudo zypper install -y $NEED_PKGS
           else
             echo "WARN: Unknown package manager; could not install: $NEED_PKGS"
             echo "Continuing pipeline anyway..."
-          fi
 
     - task: NodeTool@0
       displayName: 'Use Node.js 18.x'
@@ -489,10 +490,10 @@ stages:
           set -euo pipefail
           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
 
-          # استخدم متغيرات الـ pipeline بدل القيم الهاردكود
+          # اقرأ القيم من variables أعلاه
           LAW_ID="$(LAW_ID)"
           LAW_KEY_B64="$(LAW_KEY_B64)"
-          LOGTYPE="${LOGTYPE:-selenium_log}"
+          LOGTYPE="$(LOGTYPE)"
           COMPUTER="TrialVM"
 
           if ! command -v jq >/dev/null 2>&1; then
@@ -515,7 +516,8 @@ stages:
           rm -f raw.jsonl
           while IFS= read -r line; do
             line_esc=$(printf '%s' "$line" | sed 's/"/\\"/g')
-            printf '{"RawData":"%s UTC BuildId=%s %s","Computer":"%s"}\n' "$NOW_UTC" "$BUILDID" "$line_esc" "$COMPUTER" >> raw.jsonl
+            printf '{"RawData":"%s UTC BuildId=%s %s","Computer":"%s"}\n' \
+                   "$NOW_UTC" "$BUILDID" "$line_esc" "$COMPUTER" >> raw.jsonl
           done <<<"$MATCHED"
 
           BODY_JSON=$(jq -s '.' raw.jsonl)
@@ -523,11 +525,9 @@ stages:
           RFC_DATE="$(LC_ALL=C date -u +"%a, %d %b %Y %H:%M:%S GMT")"
           RESOURCE="/api/logs"
           URL="https://${LAW_ID}.ods.opinsights.azure.com${RESOURCE}?api-version=2016-04-01"
-
           STRING_TO_SIGN=$(printf "POST\n%s\napplication/json\nx-ms-date:%s\n%s" "$CONTENT_LEN" "$RFC_DATE" "$RESOURCE")
           export STRING_TO_SIGN LAW_KEY_B64
           SIGNATURE=$(python3 -c "import os,base64,hmac,hashlib,sys; to_sign=os.environ['STRING_TO_SIGN'].encode('utf-8'); key=base64.b64decode(os.environ['LAW_KEY_B64']); sys.stdout.write(base64.b64encode(hmac.new(key,to_sign,hashlib.sha256).digest()).decode())")
-
           AUTH_HEADER="SharedKey ${LAW_ID}:${SIGNATURE}"
 
           HTTP_CODE=$(curl -sS -o /tmp/la.out -w "%{http_code}" -X POST "$URL" --noproxy '*' \
@@ -540,10 +540,9 @@ stages:
           echo "HTTP_CODE=$HTTP_CODE"
           head -c 400 /tmp/la.out || true
           if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "202" ]; then
-            echo "ERROR: posting to Log Analytics failed"
-            exit 1
+            echo "ERROR: posting to Log Analytics failed"; exit 1
           fi
-          echo "Logs sent to ${LOGTYPE}_CL"
+          echo "✅ Logs sent to ${LOGTYPE}_CL"
 
 # =============== CLEANUP ===============
 - stage: Cleanup
