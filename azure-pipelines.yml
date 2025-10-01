@@ -309,7 +309,7 @@ stages:
               unzip -l "$ZIP" | sed -n '1,200p'
             displayName: 'Show ZIP content (sanity check)'
 
-          # إعدادات أساسية قبل النشر (Health Check + AppSettings اللازمة للبناء والتشغيل)
+          # إعدادات أساسية قبل النشر (Health Check + Runtime + Oryx)
           - task: AzureCLI@2
             displayName: 'Pre-config app settings'
             inputs:
@@ -322,16 +322,19 @@ stages:
                 APP_ORIG="$(appServiceName)-$(Build.BuildId)"
                 APP=$(echo "$APP_ORIG" | tr '[:upper:]' '[:lower:]')
 
-                # Health check path إلى الجذر (عدّله إذا عندك /health)
+                # Health check
                 az webapp config set -g "$RG" -n "$APP" --generic-configurations '{
                   "healthCheckPath": "/"
                 }' >/dev/null || true
 
-                # ✅ مهم: تفعيل Oryx أثناء Zip Deploy + بورت التشغيل + Node 18
+                # ✅ فعِّل Oryx أثناء Zip Deploy + عيّن Node 18
                 az webapp config appsettings set -g "$RG" -n "$APP" --settings \
                   SCM_DO_BUILD_DURING_DEPLOYMENT=true \
-                  WEBSITE_NODE_DEFAULT_VERSION="~18" \
-                  WEBSITES_PORT=3000 >/dev/null
+                  ENABLE_ORYX_BUILD=true \
+                  WEBSITE_NODE_DEFAULT_VERSION="~18" >/dev/null
+
+                # ✅ ثبِّت Runtime Linux Node 18 (لو الخطة Windows يتجاهل بصمت)
+                az webapp config set -g "$RG" -n "$APP" --linux-fx-version "NODE|18-lts" || true
 
                 # تفعيل اللوجات التشخيصية
                 az webapp log config -g "$RG" -n "$APP" \
@@ -357,6 +360,19 @@ stages:
 
                 echo "Target app: $APP (rg=$RG)"
 
+                # 🍥 فحص ذكي: تأكد من وجود package.json في الجذر ووجود scripts.start
+                echo "=== ZIP sanity ==="
+                PKG_PATH=$(unzip -Z1 "$ZIP" | grep -E '(^|/)+package.json$' | head -n1 || true)
+                if [ -z "$PKG_PATH" ]; then
+                  echo "❌ package.json غير موجود داخل الأرشيف. ضع ملفات التطبيق في جذر الـZIP."
+                  exit 1
+                fi
+                START_SCRIPT=$(unzip -p "$ZIP" "$PKG_PATH" | jq -r '.scripts.start // empty' 2>/dev/null || true)
+                if [ -z "$START_SCRIPT" ]; then
+                  echo "❌ scripts.start غير معرّفة في package.json. أضف مثلاً: \"start\": \"node server.js\""
+                  exit 1
+                fi
+
                 KEY=$(az storage account keys list -g "$RG" -n "$SA" --query "[0].value" -o tsv)
                 az storage container create --account-name "$SA" --name "$CN" --account-key "$KEY" --auth-mode key >/dev/null
                 az storage blob upload --account-name "$SA" --account-key "$KEY" --container-name "$CN" --name "$BLOB" --file "$ZIP" --overwrite true --auth-mode key
@@ -364,32 +380,31 @@ stages:
                 SAS=$(az storage blob generate-sas --account-name "$SA" --account-key "$KEY" --container-name "$CN" --name "$BLOB" --permissions r --expiry "$EXP" -o tsv)
                 URL="https://$SA.blob.core.windows.net/$CN/$BLOB?$SAS"
 
-                # Run From Package (RFP)
+                # ✅ RFP أولاً (بدون build)
                 az webapp config appsettings set -g "$RG" -n "$APP" --settings WEBSITE_RUN_FROM_PACKAGE="$URL" SCM_DO_BUILD_DURING_DEPLOYMENT=false >/dev/null
-                az webapp config appsettings set -g "$RG" -n "$APP" --settings WEBSITE_NODE_DEFAULT_VERSION="~18" >/dev/null || true
                 az webapp restart -g "$RG" -n "$APP"
 
-                # اختبار سريع + Ping لـ Kudu
                 APPURL="https://$APP.azurewebsites.net"
                 KUDU="https://$APP.scm.azurewebsites.net/api/settings"
                 echo "Quick probe: $APPURL"
-                # ننتظر شوي قبل الفحص
                 sleep 25
                 code=$(curl -s -o /dev/null -w "%{http_code}" "$APPURL" || echo 000)
                 echo "Probe status: $code"
-                echo "Pinging Kudu once..."
                 curl -s -I "$KUDU" >/dev/null || true
 
-                # في حالة 5xx، نلجأ لــ Zip Deploy (بعد مسح RFP)
+                # 🟡 لو فشل (5xx) ننتقل لـ Zip Deploy مع Oryx
                 if [ "$code" -ge 500 ]; then
                   echo "Falling back to Zip Deploy..."
-                  # مسح WEBSITE_RUN_FROM_PACKAGE حتى لا تتعارض مع Zip Deploy
                   az webapp config appsettings set -g "$RG" -n "$APP" --settings WEBSITE_RUN_FROM_PACKAGE="" >/dev/null || true
-                  # تفعيل Oryx للبناء أثناء Zip Deploy
-                  az webapp config appsettings set -g "$RG" -n "$APP" --settings SCM_DO_BUILD_DURING_DEPLOYMENT=true >/dev/null || true
+                  az webapp config appsettings set -g "$RG" -n "$APP" --settings SCM_DO_BUILD_DURING_DEPLOYMENT=true ENABLE_ORYX_BUILD=true >/dev/null || true
+                  # (لو تطبيقك يحتاج startup صريح على Linux)
+                  # az webapp config set -g "$RG" -n "$APP" --startup-file "npm start" || true
                   az webapp deploy -g "$RG" -n "$APP" --src-path "$ZIP" --type zip --clean true --timeout 1200
                   az webapp restart -g "$RG" -n "$APP"
                 fi
+
+                echo "--- Kudu latest deployment info URL ---"
+                echo "https://$APP.scm.azurewebsites.net/api/deployments/latest"
 
           - task: Bash@3
             displayName: 'Warm up app (robust)'
