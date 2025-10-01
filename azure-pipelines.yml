@@ -15,10 +15,10 @@ variables:
   appServiceName: 'myapp-AppService'
   DEMO_URL: 'https://www.saucedemo.com/'
 
-  # ===== Log Analytics (قِيَم صريحة داخل الملف) =====
+  # ===== Log Analytics =====
+  # ملاحظة: LAW_KEY_B64 لا نكتبه هنا؛ خزّنه كـ Pipeline Variable (Secret) من واجهة Azure DevOps
   LOGTYPE: 'Selenium_Log'   # الجدول سيكون Selenium_Log_CL
   LAW_ID: 'da6e0b1f-7a68-4ef3-8b12-be42177ac070'
-  LAW_KEY_B64: 'CTBND0JmLc1N+Dd4Po07MzVB/zvD4jVWtnLN41Ul0mCSeJqX9izqCNv4juji/zGLJY01vHkS48PpvHJZDfe45A=='
 
 stages:
 
@@ -162,7 +162,7 @@ stages:
           elif command -v yum >/dev/null 2>&1; then
             sudo yum install -y $NEED_PKGS
           elif command -v zypper >/dev/null 2>&1; then
-            sudo zyper install -y $NEED_PKGS || sudo zypper install -y $NEED_PKGS
+            sudo zypper install -y $NEED_PKGS
           else
             echo "WARN: Unknown package manager; could not install: $NEED_PKGS"
             echo "Continuing pipeline anyway..."
@@ -490,17 +490,19 @@ stages:
           set -euo pipefail
           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
 
-          # اقرأ القيم من variables أعلاه
+          # قراءة القيم من متغيرات الـ Pipeline
           LAW_ID="$(LAW_ID)"
-          LAW_KEY_B64="$(LAW_KEY_B64)"
+          LAW_KEY_B64="$(LAW_KEY_B64)"     # اجعلها Secret من واجهة Azure DevOps
           LOGTYPE="$(LOGTYPE)"
-          COMPUTER="TrialVM"
+          COMPUTER="$(Agent.MachineName)"  # اسم الوكيل/الماكينة تلقائياً
 
           if ! command -v jq >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
               sudo apt-get update -y && sudo apt-get install -y jq
             elif command -v yum >/dev/null 2>&1; then
               sudo yum install -y jq
+            elif command -v zypper >/dev/null 2>&1; then
+              sudo zypper install -y jq
             fi
           fi
 
