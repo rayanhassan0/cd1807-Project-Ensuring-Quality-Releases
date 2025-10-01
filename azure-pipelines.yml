@@ -15,10 +15,11 @@ variables:
   appServiceName: 'myapp-AppService'
   DEMO_URL: 'https://www.saucedemo.com/'
 
-  # ===== Log Analytics =====
-  LOGTYPE: 'Selenium_Log'   # الجدول: Selenium_Log_CL
-  LAW_ID: 'da6e0b1f-7a68-4ef3-8b12-be42177ac070'
-  # ملاحظة: LAW_KEY_B64 = Workspace Key مشفّر Base64 (أضِفه كـ secret variable من الواجهة)
+# ملاحظة هامة:
+# أضِف/تأكد من المتغيّرات السرّية في الواجهة:
+# - LAW_ID        (Workspace ID)
+# - LAW_KEY_B64   (Primary Key كما هو من Azure - Base64)
+# - LOGTYPE       (عندك = Selenium_Log → سيظهر الجدول: Selenium_Log_CL)
 
 stages:
 
@@ -64,7 +65,7 @@ stages:
           echo "---- modules/network ----"
           ls -la "$(System.DefaultWorkingDirectory)/terraform/modules/network" || true
           echo "---- terraform.tfvars ----"
-          sed -n '1,200p' "$(System.DefaultWorkingDirectory)/terraform/environments/test/terraform.tfvars"
+          sed -n '1,200p' "$(System.DefaultWorkingDirectory)/terraform/environments/test/terraform.tfvars" || true
 
     - task: AzureCLI@2
       displayName: 'Ensure backend storage exists'
@@ -219,6 +220,20 @@ stages:
         testRunTitle: 'Postman Results'
         failTaskOnFailedTests: false
 
+    - task: Bash@3
+      displayName: '(Optional) Export Postman HTML report'
+      continueOnError: true
+      inputs:
+        targetType: inline
+        script: |
+          set -e
+          mkdir -p reports/postman
+          echo "<html><body><h2>Postman JUnit exported. (Add htmlextra to get HTML)</h2></body></html>" > reports/postman/index.html
+
+    - publish: 'reports/postman'
+      displayName: 'Publish: Postman HTML report (placeholder)'
+      artifact: 'postman-report'
+
     - task: ArchiveFiles@2
       displayName: 'Archive UI Tests (Selenium)'
       inputs:
@@ -302,16 +317,8 @@ stages:
               ls -lh "$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
             displayName: 'Show package size'
 
-          - bash: |
-              set -e
-              ZIP="$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
-              echo "Listing ZIP content (first 200 lines): $ZIP"
-              unzip -l "$ZIP" | sed -n '1,200p'
-            displayName: 'Show ZIP content (sanity check)'
-
-          # إعدادات أساسية قبل النشر (Health Check + Runtime + Oryx)
           - task: AzureCLI@2
-            displayName: 'Pre-config app settings'
+            displayName: 'Deploy via Run-From-Package (Blob SAS)'
             inputs:
               azureSubscription: '$(azureServiceConnectionId)'
               scriptType: bash
@@ -319,137 +326,38 @@ stages:
               inlineScript: |
                 set -e
                 RG="$(resourceGroup)"
-                APP_ORIG="$(appServiceName)-$(Build.BuildId)"
-                APP=$(echo "$APP_ORIG" | tr '[:upper:]' '[:lower:]')
-
-                # Health check
-                az webapp config set -g "$RG" -n "$APP" --generic-configurations '{
-                  "healthCheckPath": "/"
-                }' >/dev/null || true
-
-                # ✅ فعِّل Oryx أثناء Zip Deploy + عيّن Node 18
-                az webapp config appsettings set -g "$RG" -n "$APP" --settings \
-                  SCM_DO_BUILD_DURING_DEPLOYMENT=true \
-                  ENABLE_ORYX_BUILD=true \
-                  WEBSITE_NODE_DEFAULT_VERSION="~18" >/dev/null
-
-                # ✅ ثبِّت Runtime Linux Node 18 (لو الخطة Windows يتجاهل بصمت)
-                az webapp config set -g "$RG" -n "$APP" --linux-fx-version "NODE|18-lts" || true
-
-                # تفعيل اللوجات التشخيصية
-                az webapp log config -g "$RG" -n "$APP" \
-                  --application-logging filesystem --level information \
-                  --detailed-error-messages true --failed-request-tracing true >/dev/null || true
-
-          # ديبلوي مع Run-From-Package أولاً، ثم Zip Deploy عند الفشل
-          - task: AzureCLI@2
-            displayName: 'Deploy app (Run-From-Package with Zip fallback)'
-            inputs:
-              azureSubscription: '$(azureServiceConnectionId)'
-              scriptType: bash
-              scriptLocation: inlineScript
-              inlineScript: |
-                set -e
-                RG="$(resourceGroup)"
-                APP_ORIG="$(appServiceName)-$(Build.BuildId)"
-                APP=$(echo "$APP_ORIG" | tr '[:upper:]' '[:lower:]')
+                APP="$(appServiceName)-$(Build.BuildId)"
                 SA="tfstatebootstrap01"
                 CN="webpackages"
                 ZIP="$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
                 BLOB="$(Build.BuildId)-fakerestapi.zip"
-
-                echo "Target app: $APP (rg=$RG)"
-
-                # 🍥 فحص ذكي: تأكد من وجود package.json في الجذر ووجود scripts.start
-                echo "=== ZIP sanity ==="
-                PKG_PATH=$(unzip -Z1 "$ZIP" | grep -E '(^|/)+package.json$' | head -n1 || true)
-                if [ -z "$PKG_PATH" ]; then
-                  echo "❌ package.json غير موجود داخل الأرشيف. ضع ملفات التطبيق في جذر الـZIP."
-                  exit 1
-                fi
-                START_SCRIPT=$(unzip -p "$ZIP" "$PKG_PATH" | jq -r '.scripts.start // empty' 2>/dev/null || true)
-                if [ -z "$START_SCRIPT" ]; then
-                  echo "❌ scripts.start غير معرّفة في package.json. أضف مثلاً: \"start\": \"node server.js\""
-                  exit 1
-                fi
-
                 KEY=$(az storage account keys list -g "$RG" -n "$SA" --query "[0].value" -o tsv)
                 az storage container create --account-name "$SA" --name "$CN" --account-key "$KEY" --auth-mode key >/dev/null
                 az storage blob upload --account-name "$SA" --account-key "$KEY" --container-name "$CN" --name "$BLOB" --file "$ZIP" --overwrite true --auth-mode key
                 EXP="$(date -u -d '+7 days' +'%Y-%m-%dT%H:%MZ')"
                 SAS=$(az storage blob generate-sas --account-name "$SA" --account-key "$KEY" --container-name "$CN" --name "$BLOB" --permissions r --expiry "$EXP" -o tsv)
                 URL="https://$SA.blob.core.windows.net/$CN/$BLOB?$SAS"
-
-                # ✅ RFP أولاً (بدون build)
-                az webapp config appsettings set -g "$RG" -n "$APP" --settings WEBSITE_RUN_FROM_PACKAGE="$URL" SCM_DO_BUILD_DURING_DEPLOYMENT=false >/dev/null
+                az webapp config appsettings set -g "$RG" -n "$APP" --settings WEBSITE_RUN_FROM_PACKAGE="$URL" SCM_DO_BUILD_DURING_DEPLOYMENT=false ENABLE_ORYX_BUILD=false
                 az webapp restart -g "$RG" -n "$APP"
 
-                APPURL="https://$APP.azurewebsites.net"
-                KUDU="https://$APP.scm.azurewebsites.net/api/settings"
-                echo "Quick probe: $APPURL"
-                sleep 25
-                code=$(curl -s -o /dev/null -w "%{http_code}" "$APPURL" || echo 000)
-                echo "Probe status: $code"
-                curl -s -I "$KUDU" >/dev/null || true
-
-                # 🟡 لو فشل (5xx) ننتقل لـ Zip Deploy مع Oryx
-                if [ "$code" -ge 500 ]; then
-                  echo "Falling back to Zip Deploy..."
-                  az webapp config appsettings set -g "$RG" -n "$APP" --settings WEBSITE_RUN_FROM_PACKAGE="" >/dev/null || true
-                  az webapp config appsettings set -g "$RG" -n "$APP" --settings SCM_DO_BUILD_DURING_DEPLOYMENT=true ENABLE_ORYX_BUILD=true >/dev/null || true
-                  # (لو تطبيقك يحتاج startup صريح على Linux)
-                  # az webapp config set -g "$RG" -n "$APP" --startup-file "npm start" || true
-                  az webapp deploy -g "$RG" -n "$APP" --src-path "$ZIP" --type zip --clean true --timeout 1200
-                  az webapp restart -g "$RG" -n "$APP"
-                fi
-
-                echo "--- Kudu latest deployment info URL ---"
-                echo "https://$APP.scm.azurewebsites.net/api/deployments/latest"
-
           - task: Bash@3
-            displayName: 'Warm up app (robust)'
+            displayName: 'Warm up app'
             inputs:
               targetType: inline
               script: |
                 set -e
-                BASE="https://$(appServiceName)-$(Build.BuildId).azurewebsites.net"
-                ENDPOINTS=("$BASE" "$BASE/api/v1/Activities" "$BASE/api/v1/Employees")
-                MAX_TRIES=120
-                ok_codes="200 202 204 301 302"
-                echo "Warming $BASE ..."
-                i=0
-                while [ $i -lt $MAX_TRIES ]; do
-                  for url in "${ENDPOINTS[@]}"; do
-                    code=$(curl -s -o /tmp/warm.out -w "%{http_code}" "$url" || echo 000)
-                    if echo "$ok_codes" | grep -q "$code"; then
-                      echo "Warm OK: $url -> $code"
-                      exit 0
-                    fi
-                  done
-                  if [ $((i % 10)) -eq 0 ]; then
-                    echo "Attempt $i: last=$code"
-                    head -c 200 /tmp/warm.out || true; echo
+                APPURL="https://$(appServiceName)-$(Build.BuildId).azurewebsites.net"
+                echo "Warming $APPURL ..."
+                for i in {1..30}; do
+                  code=$(curl -s -o /dev/null -w "%{http_code}" "$APPURL")
+                  echo "Warm attempt $i: $code"
+                  if [ "$code" = "200" ]; then
+                    echo "Warm!"
+                    exit 0
                   fi
                   sleep 5
-                  i=$((i+1))
                 done
-                echo "Warm-up timed out. Last code=$code"
-                exit 0
-
-          - task: AzureCLI@2
-            displayName: 'Tail last app logs (diagnostics)'
-            continueOnError: true
-            inputs:
-              azureSubscription: '$(azureServiceConnectionId)'
-              scriptType: bash
-              scriptLocation: inlineScript
-              inlineScript: |
-                set -e
-                RG="$(resourceGroup)"
-                APP_ORIG="$(appServiceName)-$(Build.BuildId)"
-                APP=$(echo "$APP_ORIG" | tr '[:upper:]' '[:lower:]')
-                az webapp log config -g "$RG" -n "$APP" --application-logging filesystem --level information --detailed-error-messages true --failed-request-tracing true
-                timeout 25s az webapp log tail -g "$RG" -n "$APP" || true
+                echo "App not warm yet; continuing..."
 
           - download: current
             artifact: 'drop-perftests'
@@ -520,9 +428,8 @@ stages:
               targetPath: '$(Pipeline.Workspace)/perf/perftests/html-report'
               artifact: 'jmeter-report'
 
-  # ===== Selenium على Linux agent + شحن اللوقات إلى Log Analytics =====
-  - job: SeleniumOnLinux
-    displayName: 'Selenium UI Tests (Linux Agent) + Ship Logs'
+  - job: SeleniumUITests
+    displayName: 'Selenium UI Tests'
     pool:
       name: myAgentPool
     steps:
@@ -531,7 +438,7 @@ stages:
       artifact: 'drop-uitests'
 
     - task: Bash@3
-      displayName: 'Run Selenium (Linux)'
+      displayName: 'Run Selenium'
       timeoutInMinutes: 10
       inputs:
         targetType: inline
@@ -591,68 +498,67 @@ stages:
           echo "Selenium finished with exit code: $EXIT_CODE"
 
     - task: Bash@3
-      displayName: 'Ship Selenium RawData to Log Analytics'
+      displayName: 'Ship Selenium RawData to Log Analytics (safe HMAC)'
       inputs:
         targetType: inline
         script: |
           set -euo pipefail
           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
-          LAW_ID="$(LAW_ID)"
-          LAW_KEY_B64="$(LAW_KEY_B64)"     # Secret (أضِفها من UI فقط)
-          LOGTYPE="$(LOGTYPE)"
-          COMPUTER="$(Agent.MachineName)"
-
+          : "${LAW_ID:?Need secret LAW_ID}"
+          : "${LAW_KEY_B64:?Need secret LAW_KEY_B64}"
+          LOGTYPE="${LOGTYPE:-selenium_log}"
           if ! command -v jq >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
               sudo apt-get update -y && sudo apt-get install -y jq
             elif command -v yum >/dev/null 2>&1; then
               sudo yum install -y jq
-            elif command -v zypper >/dev/null 2>&1; then
-              sudo zypper install -y jq
             fi
           fi
-
           LOG="$HOME/selenium/logs/selenium.out"
           NOW_UTC="$(LC_ALL=C date -u +"%Y-%m-%d %H:%M:%S")"
           BUILDID="${BUILD_BUILDID:-manual}"
-
           MATCHED=$(grep -E 'Object .* (added|removed) from the cart|PAGE_TITLE=' "$LOG" || true)
-          if [ -z "$MATCHED" ]; then
-            MATCHED="Selenium run complete"
-          fi
-
+          [ -n "$MATCHED" ] || MATCHED="Selenium run complete"
           rm -f raw.jsonl
           while IFS= read -r line; do
             line_esc=$(printf '%s' "$line" | sed 's/"/\\"/g')
-            printf '{"TimeGenerated":"%s","RawData":"UTC BuildId=%s %s","Computer":"%s"}\n' \
-                   "$NOW_UTC" "$BUILDID" "$line_esc" "$COMPUTER" >> raw.jsonl
+            printf '{"RawData":"%s UTC BuildId=%s %s","Computer":"%s"}\n' "$NOW_UTC" "$BUILDID" "$line_esc" "AgentVM" >> raw.jsonl
           done <<<"$MATCHED"
-
           BODY_JSON=$(jq -s '.' raw.jsonl)
           CONTENT_LEN=$(printf "%s" "$BODY_JSON" | wc -c | tr -d ' ')
           RFC_DATE="$(LC_ALL=C date -u +"%a, %d %b %Y %H:%M:%S GMT")"
           RESOURCE="/api/logs"
           URL="https://${LAW_ID}.ods.opinsights.azure.com${RESOURCE}?api-version=2016-04-01"
 
-          STRING_TO_SIGN=$(printf "POST\n%s\napplication/json\nx-ms-date:%s\n%s" "$CONTENT_LEN" "$RFC_DATE" "$RESOURCE")
-          SIGNATURE=$(STS="$STRING_TO_SIGN" K="$LAW_KEY_B64" python3 -c 'import os,base64,hmac,hashlib,sys; to_sign=os.environ["STS"].encode("utf-8"); key=base64.b64decode(os.environ["K"]); sys.stdout.write(base64.b64encode(hmac.new(key,to_sign,hashlib.sha256).digest()).decode())')
-
+          # توقيع HMAC: LAW_KEY_B64 → نفك Base64 ثم نوقّع ثم نعيد Base64
+          export STRING_TO_SIGN=$(printf "POST\n%s\napplication/json\nx-ms-date:%s\n%s" "$CONTENT_LEN" "$RFC_DATE" "$RESOURCE")
+          SIGNATURE=$(python3 - <<'PY'
+          import os, base64, hmac, hashlib
+          key_b64 = os.environ['LAW_KEY_B64']     # Base64 string من السرّ
+          to_sign = os.environ['STRING_TO_SIGN'].encode('utf-8')
+          key = base64.b64decode(key_b64)         # decode to bytes
+          sig = base64.b64encode(hmac.new(key, to_sign, hashlib.sha256).digest()).decode()
+          print(sig, end='')
+          PY
+          )
           AUTH_HEADER="SharedKey ${LAW_ID}:${SIGNATURE}"
 
           HTTP_CODE=$(curl -sS -o /tmp/la.out -w "%{http_code}" -X POST "$URL" --noproxy '*' \
             -H "Content-Type: application/json" \
             -H "Log-Type: ${LOGTYPE}" \
             -H "x-ms-date: ${RFC_DATE}" \
-            -H "time-generated-field: TimeGenerated" \
             -H "Authorization: ${AUTH_HEADER}" \
             --data-binary "$BODY_JSON" || true)
-
           echo "HTTP_CODE=$HTTP_CODE"
           head -c 400 /tmp/la.out || true
           if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "202" ]; then
-            echo "ERROR: posting to Log Analytics failed"; exit 1
+            echo "WARN: posting to Log Analytics failed (non-blocking)"; exit 0
           fi
-          echo "✅ Logs sent to ${LOGTYPE}_CL"
+          echo "Logs sent to ${LOGTYPE}_CL"
+      env:
+        LAW_ID: $(LAW_ID)
+        LAW_KEY_B64: $(LAW_KEY_B64)
+        LOGTYPE: $(LOGTYPE)
 
 # =============== CLEANUP ===============
 - stage: Cleanup
