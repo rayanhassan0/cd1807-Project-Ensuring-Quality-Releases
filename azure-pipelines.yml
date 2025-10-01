@@ -17,7 +17,7 @@ variables:
   LOGTYPE: 'Selenium_Log'   # جدول Log Analytics سيكون: Selenium_Log_CL
 
 # ملاحظة هامة:
-# أضِف/تأكد من المتغيّرات السرّية في الواجهة:
+# أضِف/تأكد من المتغيّرات السرّية في واجهة Azure DevOps:
 # - LAW_ID        (Workspace ID)
 # - LAW_KEY_B64   (Primary Key كما هو من Azure - Base64)
 
@@ -266,7 +266,8 @@ stages:
         archiveType: 'zip'
         archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-perftests.zip'
 
-    - publish: '$(Build.ArtifactStagingDirectory)/perftests.zip'
+    # ✅ التصحيح هنا: ننشر الاسم الصحيح مع BuildId
+    - publish: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-perftests.zip'
       displayName: 'Publish Perf Tests Artifact'
       artifact: 'drop-perftests'
 
@@ -335,6 +336,7 @@ stages:
                 az storage container create --account-name "$SA" --name "$CN" --account-key "$KEY" --auth-mode key >/dev/null
                 az storage blob upload --account-name "$SA" --account-key "$KEY" --container-name "$CN" --name "$BLOB" --file "$ZIP" --overwrite true --auth-mode key
                 EXP="$(date -u -d '+7 days' +'%Y-%m-%dT%H:%MZ')"
+                SAS=$(az tomorrow 2>/dev/null || true) # placeholder harmless
                 SAS=$(az storage blob generate-sas --account-name "$SA" --account-key "$KEY" --container-name "$CN" --name "$BLOB" --permissions r --expiry "$EXP" -o tsv)
                 URL="https://$SA.blob.core.windows.net/$CN/$BLOB?$SAS"
                 az webapp config appsettings set -g "$RG" -n "$APP" --settings WEBSITE_RUN_FROM_PACKAGE="$URL" SCM_DO_BUILD_DURING_DEPLOYMENT=false ENABLE_ORYX_BUILD=false
@@ -497,7 +499,6 @@ stages:
           set -e
           echo "Selenium finished with exit code: $EXIT_CODE"
 
-    # ===== إرسال تشخيصي إلى Log Analytics =====
     - task: Bash@3
       displayName: 'Ship Selenium RawData to Log Analytics (diagnostic)'
       inputs:
