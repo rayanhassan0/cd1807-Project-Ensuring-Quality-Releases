@@ -18,7 +18,7 @@ variables:
   # ===== Log Analytics =====
   LOGTYPE: 'Selenium_Log'   # الجدول: Selenium_Log_CL
   LAW_ID: 'da6e0b1f-7a68-4ef3-8b12-be42177ac070'
-  # ملاحظة مهمة: LAW_KEY_B64 لا يوضع هنا، أضفه كـ Secret Variable من واجهة Azure DevOps
+  # ملاحظة: LAW_KEY_B64 = Workspace Key مشفّر Base64 (أضِفه كـ secret variable من الواجهة)
 
 stages:
 
@@ -302,13 +302,34 @@ stages:
               ls -lh "$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
             displayName: 'Show package size'
 
-          # عرض محتوى الحزمة للتأكد من هيكل الجذر
           - bash: |
               set -e
               ZIP="$(Pipeline.Workspace)/drop-fakerestapi/$(Build.BuildId)-fakerestapi.zip"
               echo "Listing ZIP content (first 200 lines): $ZIP"
               unzip -l "$ZIP" | sed -n '1,200p'
             displayName: 'Show ZIP content (sanity check)'
+
+          # إعدادات أساسية قبل النشر (Health Check + Logs)
+          - task: AzureCLI@2
+            displayName: 'Pre-config app settings'
+            inputs:
+              azureSubscription: '$(azureServiceConnectionId)'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -e
+                RG="$(resourceGroup)"
+                APP_ORIG="$(appServiceName)-$(Build.BuildId)"
+                APP=$(echo "$APP_ORIG" | tr '[:upper:]' '[:lower:]')
+
+                # Health check path إلى الجذر (عدّله إذا عندك /health)
+                az webapp config set -g "$RG" -n "$APP" --generic-configurations '{
+                  "healthCheckPath": "/"
+                }' >/dev/null || true
+
+                az webapp log config -g "$RG" -n "$APP" \
+                  --application-logging filesystem --level information \
+                  --detailed-error-messages true --failed-request-tracing true >/dev/null || true
 
           # ديبلوي مع Run-From-Package وباك-أب Zip Deploy
           - task: AzureCLI@2
@@ -336,22 +357,29 @@ stages:
                 SAS=$(az storage blob generate-sas --account-name "$SA" --account-key "$KEY" --container-name "$CN" --name "$BLOB" --permissions r --expiry "$EXP" -o tsv)
                 URL="https://$SA.blob.core.windows.net/$CN/$BLOB?$SAS"
 
+                # Run From Package
                 az webapp config appsettings set -g "$RG" -n "$APP" --settings WEBSITE_RUN_FROM_PACKAGE="$URL" SCM_DO_BUILD_DURING_DEPLOYMENT=false ENABLE_ORYX_BUILD=false >/dev/null
+                az webapp config appsettings set -g "$RG" -n "$APP" --settings WEBSITE_NODE_DEFAULT_VERSION="~18" >/dev/null || true
                 az webapp restart -g "$RG" -n "$APP"
 
+                # اختبار سريع + Ping لـ Kudu
                 APPURL="https://$APP.azurewebsites.net"
-                echo "Quick probe $APPURL"
+                KUDU="https://$APP.scm.azurewebsites.net/api/settings"
+                echo "Quick probe: $APPURL"
                 code=$(curl -s -o /dev/null -w "%{http_code}" "$APPURL" || echo 000)
                 echo "Probe status: $code"
+                echo "Pinging Kudu once..."
+                curl -s -I "$KUDU" >/dev/null || true
+
+                # في حالة 5xx، نلجأ لــ Zip Deploy (بعد مسح RFP)
                 if [ "$code" -ge 500 ]; then
                   echo "Falling back to Zip Deploy..."
-                  az webapp deploy -g "$RG" -n "$APP" --src-path "$ZIP" --type zip --clean true --timeout 600
+                  # مسح WEBSITE_RUN_FROM_PACKAGE حتى لا تتعارض مع Zip Deploy
+                  az webapp config appsettings set -g "$RG" -n "$APP" --settings WEBSITE_RUN_FROM_PACKAGE="" >/dev/null || true
+                  az webapp deploy -g "$RG" -n "$APP" --src-path "$ZIP" --type zip --clean true --timeout 1200
                   az webapp restart -g "$RG" -n "$APP"
                 fi
 
-                az webapp config appsettings set -g "$RG" -n "$APP" --settings WEBSITE_NODE_DEFAULT_VERSION="~18" >/dev/null || true
-
-          # وورم-أب محسّن
           - task: Bash@3
             displayName: 'Warm up app (robust)'
             inputs:
@@ -382,7 +410,6 @@ stages:
                 echo "Warm-up timed out. Last code=$code"
                 exit 0
 
-          # لوج التطبيق للتشخيص
           - task: AzureCLI@2
             displayName: 'Tail last app logs (diagnostics)'
             continueOnError: true
@@ -467,7 +494,7 @@ stages:
               targetPath: '$(Pipeline.Workspace)/perf/perftests/html-report'
               artifact: 'jmeter-report'
 
-  # ===== Selenium على Linux agent + شحن اللوق إلى Log Analytics =====
+  # ===== Selenium على Linux agent + شحن اللوقات إلى Log Analytics =====
   - job: SeleniumOnLinux
     displayName: 'Selenium UI Tests (Linux Agent) + Ship Logs'
     pool:
@@ -581,10 +608,7 @@ stages:
           RESOURCE="/api/logs"
           URL="https://${LAW_ID}.ods.opinsights.azure.com${RESOURCE}?api-version=2016-04-01"
 
-          # بناء نص التوقيع الصحيح
           STRING_TO_SIGN=$(printf "POST\n%s\napplication/json\nx-ms-date:%s\n%s" "$CONTENT_LEN" "$RFC_DATE" "$RESOURCE")
-
-          # حساب التوقيع (بايثون في سطر واحد لتجنّب مشاكل YAML)
           SIGNATURE=$(STS="$STRING_TO_SIGN" K="$LAW_KEY_B64" python3 -c 'import os,base64,hmac,hashlib,sys; to_sign=os.environ["STS"].encode("utf-8"); key=base64.b64decode(os.environ["K"]); sys.stdout.write(base64.b64encode(hmac.new(key,to_sign,hashlib.sha256).digest()).decode())')
 
           AUTH_HEADER="SharedKey ${LAW_ID}:${SIGNATURE}"
