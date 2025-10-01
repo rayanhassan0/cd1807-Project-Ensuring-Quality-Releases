@@ -309,7 +309,7 @@ stages:
               unzip -l "$ZIP" | sed -n '1,200p'
             displayName: 'Show ZIP content (sanity check)'
 
-          # إعدادات أساسية قبل النشر (Health Check + Logs)
+          # إعدادات أساسية قبل النشر (Health Check + AppSettings اللازمة للبناء والتشغيل)
           - task: AzureCLI@2
             displayName: 'Pre-config app settings'
             inputs:
@@ -327,11 +327,18 @@ stages:
                   "healthCheckPath": "/"
                 }' >/dev/null || true
 
+                # ✅ مهم: تفعيل Oryx أثناء Zip Deploy + بورت التشغيل + Node 18
+                az webapp config appsettings set -g "$RG" -n "$APP" --settings \
+                  SCM_DO_BUILD_DURING_DEPLOYMENT=true \
+                  WEBSITE_NODE_DEFAULT_VERSION="~18" \
+                  WEBSITES_PORT=3000 >/dev/null
+
+                # تفعيل اللوجات التشخيصية
                 az webapp log config -g "$RG" -n "$APP" \
                   --application-logging filesystem --level information \
                   --detailed-error-messages true --failed-request-tracing true >/dev/null || true
 
-          # ديبلوي مع Run-From-Package وباك-أب Zip Deploy
+          # ديبلوي مع Run-From-Package أولاً، ثم Zip Deploy عند الفشل
           - task: AzureCLI@2
             displayName: 'Deploy app (Run-From-Package with Zip fallback)'
             inputs:
@@ -357,8 +364,8 @@ stages:
                 SAS=$(az storage blob generate-sas --account-name "$SA" --account-key "$KEY" --container-name "$CN" --name "$BLOB" --permissions r --expiry "$EXP" -o tsv)
                 URL="https://$SA.blob.core.windows.net/$CN/$BLOB?$SAS"
 
-                # Run From Package
-                az webapp config appsettings set -g "$RG" -n "$APP" --settings WEBSITE_RUN_FROM_PACKAGE="$URL" SCM_DO_BUILD_DURING_DEPLOYMENT=false ENABLE_ORYX_BUILD=false >/dev/null
+                # Run From Package (RFP)
+                az webapp config appsettings set -g "$RG" -n "$APP" --settings WEBSITE_RUN_FROM_PACKAGE="$URL" SCM_DO_BUILD_DURING_DEPLOYMENT=false >/dev/null
                 az webapp config appsettings set -g "$RG" -n "$APP" --settings WEBSITE_NODE_DEFAULT_VERSION="~18" >/dev/null || true
                 az webapp restart -g "$RG" -n "$APP"
 
@@ -366,6 +373,8 @@ stages:
                 APPURL="https://$APP.azurewebsites.net"
                 KUDU="https://$APP.scm.azurewebsites.net/api/settings"
                 echo "Quick probe: $APPURL"
+                # ننتظر شوي قبل الفحص
+                sleep 25
                 code=$(curl -s -o /dev/null -w "%{http_code}" "$APPURL" || echo 000)
                 echo "Probe status: $code"
                 echo "Pinging Kudu once..."
@@ -376,6 +385,8 @@ stages:
                   echo "Falling back to Zip Deploy..."
                   # مسح WEBSITE_RUN_FROM_PACKAGE حتى لا تتعارض مع Zip Deploy
                   az webapp config appsettings set -g "$RG" -n "$APP" --settings WEBSITE_RUN_FROM_PACKAGE="" >/dev/null || true
+                  # تفعيل Oryx للبناء أثناء Zip Deploy
+                  az webapp config appsettings set -g "$RG" -n "$APP" --settings SCM_DO_BUILD_DURING_DEPLOYMENT=true >/dev/null || true
                   az webapp deploy -g "$RG" -n "$APP" --src-path "$ZIP" --type zip --clean true --timeout 1200
                   az webapp restart -g "$RG" -n "$APP"
                 fi
@@ -572,7 +583,7 @@ stages:
           set -euo pipefail
           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
           LAW_ID="$(LAW_ID)"
-          LAW_KEY_B64="$(LAW_KEY_B64)"     # Secret
+          LAW_KEY_B64="$(LAW_KEY_B64)"     # Secret (أضِفها من UI فقط)
           LOGTYPE="$(LOGTYPE)"
           COMPUTER="$(Agent.MachineName)"
 
