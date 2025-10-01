@@ -266,7 +266,6 @@ stages:
         archiveType: 'zip'
         archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-perftests.zip'
 
-    # ✅ التصحيح هنا: ننشر الاسم الصحيح مع BuildId
     - publish: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-perftests.zip'
       displayName: 'Publish Perf Tests Artifact'
       artifact: 'drop-perftests'
@@ -336,7 +335,6 @@ stages:
                 az storage container create --account-name "$SA" --name "$CN" --account-key "$KEY" --auth-mode key >/dev/null
                 az storage blob upload --account-name "$SA" --account-key "$KEY" --container-name "$CN" --name "$BLOB" --file "$ZIP" --overwrite true --auth-mode key
                 EXP="$(date -u -d '+7 days' +'%Y-%m-%dT%H:%MZ')"
-                SAS=$(az tomorrow 2>/dev/null || true) # placeholder harmless
                 SAS=$(az storage blob generate-sas --account-name "$SA" --account-key "$KEY" --container-name "$CN" --name "$BLOB" --permissions r --expiry "$EXP" -o tsv)
                 URL="https://$SA.blob.core.windows.net/$CN/$BLOB?$SAS"
                 az webapp config appsettings set -g "$RG" -n "$APP" --settings WEBSITE_RUN_FROM_PACKAGE="$URL" SCM_DO_BUILD_DURING_DEPLOYMENT=false ENABLE_ORYX_BUILD=false
@@ -518,6 +516,15 @@ stages:
             fi
           fi
 
+          # تأكد من توفر python3 (في بعض الـ agents يكون python فقط غير مثبت)
+          if ! command -v python3 >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get update -y && sudo apt-get install -y python3
+            elif command -v yum >/dev/null 2>&1; then
+              sudo yum install -y python3
+            fi
+          fi
+
           LOG="$HOME/selenium/logs/selenium.out"
           NOW_UTC="$(date -u +%FT%TZ)"
           BUILDID="${BUILD_BUILDID:-manual}"
@@ -546,7 +553,8 @@ stages:
 
           export STRING_TO_SIGN=$(printf "POST\n%s\napplication/json\nx-ms-date:%s\n%s" "$CONTENT_LEN" "$RFC_DATE" "$RESOURCE")
 
-          SIGNATURE=$(python - <<'PY'
+          # ✅ استخدم python3
+          SIGNATURE=$(python3 - <<'PY'
           import os, base64, hmac, hashlib
           key_b64 = os.environ['LAW_KEY_B64']   # Primary Key (Base64)
           key = base64.b64decode(key_b64)       # نفك Base64 قبل HMAC
