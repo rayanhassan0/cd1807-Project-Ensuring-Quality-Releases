@@ -136,12 +136,20 @@ stages:
 
     - task: ms-devlabs.custom-terraform-tasks.custom-terraform-release-task.TerraformTaskV3@3
       displayName: 'Terraform apply'
+      # ✅ أعد المحاولة تلقائياً إذا فشلت الخطوة بسبب أخطاء مؤقتة
+      retryCountOnTaskFailure: 2
       inputs:
         provider: 'azurerm'
         command: 'apply'
         workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/environments/test'
-        commandOptions: '-auto-approve -var="app_service_name=$(appServiceName)-$(Build.BuildId)"'
+        # ✅ مهلة قفل أطول + تنفيذ تسلسلي لتقليل مشاكل الشبكة
+        commandOptions: >
+          -auto-approve
+          -lock-timeout=5m
+          -parallelism=1
+          -var="app_service_name=$(appServiceName)-$(Build.BuildId)"
         environmentServiceNameAzureRM: '$(azureServiceConnectionId)'
+
 
     - task: Bash@3
       displayName: 'Install CLI deps (zip, unzip, pip)'
