@@ -14,12 +14,12 @@ variables:
   resourceGroup: 'Azuredevops'
   appServiceName: 'myapp-AppService'
   DEMO_URL: 'https://www.saucedemo.com/'
+  LOGTYPE: 'Selenium_Log'   # جدول Log Analytics سيكون: Selenium_Log_CL
 
 # ملاحظة هامة:
 # أضِف/تأكد من المتغيّرات السرّية في الواجهة:
 # - LAW_ID        (Workspace ID)
 # - LAW_KEY_B64   (Primary Key كما هو من Azure - Base64)
-# - LOGTYPE       (عندك = Selenium_Log → سيظهر الجدول: Selenium_Log_CL)
 
 stages:
 
@@ -266,7 +266,7 @@ stages:
         archiveType: 'zip'
         archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-perftests.zip'
 
-    - publish: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)-perftests.zip'
+    - publish: '$(Build.ArtifactStagingDirectory)/perftests.zip'
       displayName: 'Publish Perf Tests Artifact'
       artifact: 'drop-perftests'
 
@@ -497,8 +497,9 @@ stages:
           set -e
           echo "Selenium finished with exit code: $EXIT_CODE"
 
+    # ===== إرسال تشخيصي إلى Log Analytics =====
     - task: Bash@3
-      displayName: 'Ship Selenium RawData to Log Analytics (safe HMAC)'
+      displayName: 'Ship Selenium RawData to Log Analytics (diagnostic)'
       inputs:
         targetType: inline
         script: |
@@ -506,7 +507,8 @@ stages:
           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
           : "${LAW_ID:?Need secret LAW_ID}"
           : "${LAW_KEY_B64:?Need secret LAW_KEY_B64}"
-          LOGTYPE="${LOGTYPE:-selenium_log}"
+          LOGTYPE="${LOGTYPE:-Selenium_Log}"
+
           if ! command -v jq >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
               sudo apt-get update -y && sudo apt-get install -y jq
@@ -514,47 +516,57 @@ stages:
               sudo yum install -y jq
             fi
           fi
+
           LOG="$HOME/selenium/logs/selenium.out"
-          NOW_UTC="$(LC_ALL=C date -u +"%Y-%m-%d %H:%M:%S")"
+          NOW_UTC="$(date -u +%FT%TZ)"
           BUILDID="${BUILD_BUILDID:-manual}"
-          MATCHED=$(grep -E 'Object .* (added|removed) from the cart|PAGE_TITLE=' "$LOG" || true)
+          HOSTNAME="$(hostname)"
+          MATCHED="$(grep -E 'PAGE_TITLE=|Object .* (added|removed) from the cart' "$LOG" || true)"
           [ -n "$MATCHED" ] || MATCHED="Selenium run complete"
-          rm -f raw.jsonl
+
+          DIAG_GUID="$(uuidgen || cat /proc/sys/kernel/random/uuid || echo RND-$RANDOM)"
+          DIAG_MSG="DIAG: pipeline=${BUILDID} guid=${DIAG_GUID}"
+
+          TMP="raw.jsonl"
+          rm -f "$TMP"
           while IFS= read -r line; do
-            line_esc=$(printf '%s' "$line" | sed 's/"/\\"/g')
-            printf '{"RawData":"%s UTC BuildId=%s %s","Computer":"%s"}\n' "$NOW_UTC" "$BUILDID" "$line_esc" "AgentVM" >> raw.jsonl
+            esc=$(printf '%s' "$line" | sed 's/\"/\\\"/g')
+            printf '{"TimestampUtc":"%s","Computer":"%s","BuildId":"%s","RawData":"%s"}\n' \
+                   "$NOW_UTC" "$HOSTNAME" "$BUILDID" "$esc" >> "$TMP"
           done <<<"$MATCHED"
-          BODY_JSON=$(jq -s '.' raw.jsonl)
+          printf '{"TimestampUtc":"%s","Computer":"%s","BuildId":"%s","RawData":"%s"}\n' \
+                 "$NOW_UTC" "$HOSTNAME" "$BUILDID" "$DIAG_MSG" >> "$TMP"
+
+          BODY_JSON=$(jq -s '.' "$TMP")
           CONTENT_LEN=$(printf "%s" "$BODY_JSON" | wc -c | tr -d ' ')
           RFC_DATE="$(LC_ALL=C date -u +"%a, %d %b %Y %H:%M:%S GMT")"
           RESOURCE="/api/logs"
           URL="https://${LAW_ID}.ods.opinsights.azure.com${RESOURCE}?api-version=2016-04-01"
 
-          # توقيع HMAC: LAW_KEY_B64 → نفك Base64 ثم نوقّع ثم نعيد Base64
           export STRING_TO_SIGN=$(printf "POST\n%s\napplication/json\nx-ms-date:%s\n%s" "$CONTENT_LEN" "$RFC_DATE" "$RESOURCE")
-          SIGNATURE=$(python3 - <<'PY'
+
+          SIGNATURE=$(python - <<'PY'
           import os, base64, hmac, hashlib
-          key_b64 = os.environ['LAW_KEY_B64']     # Base64 string من السرّ
+          key_b64 = os.environ['LAW_KEY_B64']   # Primary Key (Base64)
+          key = base64.b64decode(key_b64)       # نفك Base64 قبل HMAC
           to_sign = os.environ['STRING_TO_SIGN'].encode('utf-8')
-          key = base64.b64decode(key_b64)         # decode to bytes
           sig = base64.b64encode(hmac.new(key, to_sign, hashlib.sha256).digest()).decode()
           print(sig, end='')
           PY
           )
+
           AUTH_HEADER="SharedKey ${LAW_ID}:${SIGNATURE}"
 
           HTTP_CODE=$(curl -sS -o /tmp/la.out -w "%{http_code}" -X POST "$URL" --noproxy '*' \
             -H "Content-Type: application/json" \
             -H "Log-Type: ${LOGTYPE}" \
+            -H "time-generated-field: TimestampUtc" \
             -H "x-ms-date: ${RFC_DATE}" \
             -H "Authorization: ${AUTH_HEADER}" \
             --data-binary "$BODY_JSON" || true)
           echo "HTTP_CODE=$HTTP_CODE"
-          head -c 400 /tmp/la.out || true
-          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "202" ]; then
-            echo "WARN: posting to Log Analytics failed (non-blocking)"; exit 0
-          fi
-          echo "Logs sent to ${LOGTYPE}_CL"
+          tail -c 400 /tmp/la.out || true
+          echo "Sent DIAG GUID: ${DIAG_GUID}"
       env:
         LAW_ID: $(LAW_ID)
         LAW_KEY_B64: $(LAW_KEY_B64)
